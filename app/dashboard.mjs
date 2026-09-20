@@ -28,8 +28,14 @@ export function openCodeTaskStartedAt(messages) {
 }
 
 export function codexTaskStartedAt(thread) {
-  const turn = [...(Array.isArray(thread?.turns) ? thread.turns : [])].reverse().find((item) => item?.status === "inProgress" || (item?.startedAt && !item?.completedAt))
+  const turns = Array.isArray(thread?.turns) ? thread.turns : []
+  const turn = turns.at(-1)
+  if (!turn?.startedAt || turn?.completedAt) return 0
   return timestampMilliseconds(turn?.startedAt)
+}
+
+export function codexThreadAppearsActive(thread) {
+  return codexTaskStartedAt(thread) > 0
 }
 
 export function pendingBreakdown({ approvals = 0, questions = 0 } = {}) {

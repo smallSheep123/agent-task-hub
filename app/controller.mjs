@@ -6,7 +6,7 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { createI18n } from "./locales.mjs"
 import { decodeSessionAction, encodeSessionAction, enterAgentMode, enterGlobalMode, filterAgentSessions, initializeAgentContext, migrateSessionCollections, selectAgentSession, sessionIdentity } from "./agent-context.mjs"
-import { codexTaskStartedAt, isRunningStatus, openCodeTaskStartedAt } from "./dashboard.mjs"
+import { codexTaskStartedAt, codexThreadAppearsActive, isRunningStatus, openCodeTaskStartedAt } from "./dashboard.mjs"
 import { approvalOptionsForRequest, approvalResponseForRequest, CodexAppServer, terminalEventFromNotification } from "../adapters/codex-app-server.mjs"
 import { chooseOpenCodeQuestionOption, completeOpenCodeQuestion, nextOpenCodeQuestionIndex, normalizeOpenCodeQuestion, openCodeQuestionAnswers, openCodeQuestionToken, submitOpenCodeQuestion } from "../adapters/opencode-question.mjs"
 
@@ -1208,6 +1208,7 @@ async function main(options = {}) {
     const queued = state.queueInFlight[key]
     const queuedAt = Date.parse(queued?.dispatchedAt || queued?.sentAt || 0)
     if (Number.isFinite(queuedAt) && queuedAt > 0) return queuedAt
+    if (Number(session.dashboardStartedAt) > 0) return Number(session.dashboardStartedAt)
     try {
       if ((session.backend || "opencode") === "codex") {
         const client = await ensureCodexClient(config.codexCommand || null)
@@ -1225,6 +1226,34 @@ async function main(options = {}) {
       const queue = state.queues[migrateSessionState(session)]
       return sum + (Array.isArray(queue) ? queue.length : 0)
     }, 0)
+  }
+
+  async function enrichCodexDashboardActivity(allSessions) {
+    const codexSessions = filterAgentSessions(allSessions, "codex")
+    const alreadyRunning = new Set(codexSessions.filter((session) => isRunningStatus(session.status)).map((session) => session.id))
+    const preferredIds = new Set()
+    if (state.selected?.backend === "codex") preferredIds.add(state.selected.id)
+    for (const [key, item] of Object.entries(state.queueInFlight)) if (key.startsWith("codex:") && item) preferredIds.add(key.slice(key.lastIndexOf(":") + 1))
+    for (const request of Object.values(state.codexRequests)) if (!request.resolvedAt && request.params?.threadId) preferredIds.add(String(request.params.threadId))
+    const probeLimit = Math.max(3, Math.min(12, Number(config.dashboardCodexProbeLimit || 8)))
+    const candidates = codexSessions
+      .filter((session) => !alreadyRunning.has(session.id))
+      .sort((left, right) => {
+        const preferred = Number(preferredIds.has(right.id)) - Number(preferredIds.has(left.id))
+        if (preferred) return preferred
+        return Number(right.updatedAt || 0) - Number(left.updatedAt || 0)
+      })
+      .slice(0, probeLimit)
+    if (!candidates.length) return allSessions
+    const client = await ensureCodexClient(config.codexCommand || null)
+    const results = await Promise.allSettled(candidates.map((session) => client.readThread(session.id)))
+    results.forEach((result, index) => {
+      if (result.status !== "fulfilled" || !codexThreadAppearsActive(result.value)) return
+      candidates[index].status = "busy"
+      candidates[index].dashboardStartedAt = codexTaskStartedAt(result.value)
+      candidates[index].activeTurnId = result.value?.turns?.at(-1)?.id || candidates[index].activeTurnId || null
+    })
+    return allSessions
   }
 
   async function homeAgentSection(allSessions, backend) {
@@ -1258,7 +1287,7 @@ async function main(options = {}) {
   }
 
   async function buildHomePayload() {
-    const sessions = await discoverSessions()
+    const sessions = await enrichCodexDashboardActivity(await discoverSessions())
     const [openCode, codex] = await Promise.all([homeAgentSection(sessions, "opencode"), homeAgentSection(sessions, "codex")])
     const openRequests = requestCounts("opencode")
     const codexRequests = requestCounts("codex")

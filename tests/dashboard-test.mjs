@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { codexTaskStartedAt, isRunningStatus, openCodeTaskStartedAt, pendingBreakdown, timestampMilliseconds } from "../app/dashboard.mjs"
+import { codexTaskStartedAt, codexThreadAppearsActive, isRunningStatus, openCodeTaskStartedAt, pendingBreakdown, timestampMilliseconds } from "../app/dashboard.mjs"
 
 assert.equal(timestampMilliseconds(1700000000), 1700000000000)
 assert.equal(timestampMilliseconds(1700000000000), 1700000000000)
@@ -21,6 +21,10 @@ assert.equal(openCodeTaskStartedAt(messages), 1700000020000)
 assert.equal(openCodeTaskStartedAt([]), 0)
 assert.equal(codexTaskStartedAt({ turns: [{ status: "completed", startedAt: 1700000000 }, { status: "inProgress", startedAt: 1700000100 }] }), 1700000100000)
 assert.equal(codexTaskStartedAt({ turns: [{ status: "interrupted", startedAt: 1700000200, completedAt: null }] }), 1700000200000)
+assert.equal(codexThreadAppearsActive({ turns: [{ status: "interrupted", startedAt: 1700000200, completedAt: null }] }), true)
+assert.equal(codexThreadAppearsActive({ turns: [{ status: "interrupted", startedAt: 1700000200, completedAt: 1700000300 }] }), false)
+assert.equal(codexThreadAppearsActive({ turns: [{ status: "interrupted", startedAt: 1700000200, completedAt: null }, { status: "completed", startedAt: 1700000300, completedAt: 1700000400 }] }), false)
+assert.equal(codexThreadAppearsActive({ turns: [{ status: "inProgress", startedAt: 1700000200 }, { status: "completed", startedAt: 1700000300, completedAt: 1700000400 }] }), false)
 assert.equal(codexTaskStartedAt({ turns: [] }), 0)
 assert.deepEqual(pendingBreakdown({ approvals: 2, questions: 1 }), { approvals: 2, questions: 1 })
 
