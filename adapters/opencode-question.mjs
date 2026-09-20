@@ -16,7 +16,8 @@ export function normalizeOpenCodeQuestion(raw) {
         })).filter((option) => option.label)
       : [],
     multiple: Boolean(question?.multiple),
-    custom: Boolean(question?.custom),
+    // OpenCode Desktop shows a free-text row when the field is omitted.
+    custom: question?.custom !== false,
   }))
   if (questions.some((question) => !question.question)) return null
   return {

@@ -20,6 +20,8 @@ const normalized = normalizeOpenCodeQuestion({
 })
 assert.equal(normalized.requestId, "que_123")
 assert.equal(normalized.questions.length, 2)
+assert.equal(normalizeOpenCodeQuestion({ id: "que_default", sessionID: "ses_default", questions: [{ header: "Next", question: "Continue?", options: [] }] }).questions[0].custom, true)
+assert.equal(normalizeOpenCodeQuestion({ id: "que_no_custom", sessionID: "ses_default", questions: [{ header: "Next", question: "Continue?", options: [], custom: false }] }).questions[0].custom, false)
 assert.equal(normalizeOpenCodeQuestion({ id: "bad" }), null)
 
 const request = { ...normalized, answers: {}, completedQuestions: {} }
