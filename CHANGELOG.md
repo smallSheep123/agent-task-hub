@@ -20,12 +20,13 @@ All notable changes to this project are documented here.
 - Unified `/questions` and `/answer` across OpenCode and Codex, with newest-presented routing when both agents are waiting.
 - Added a live aggregated-home dashboard with per-agent running conversations, elapsed time, project paths, waiting queue counts, request blockers, refresh, and direct active-session buttons.
 - Detect Codex Desktop-owned work whose separate app-server view reports `notLoaded` while the latest persisted turn has `startedAt` but no `completedAt`; probe only recent and preferred tasks to keep the dashboard responsive.
+- Added safe Telegram MarkdownV2 rendering for dashboard, session, queue, approval, question, help, and completion messages, including bold headings, inline status/path values, quoted assistant replies, and automatic escaping of dynamic content.
 
 ### Changed
 
 - Reduced the visible Telegram command menu to the common daily operations; advanced commands remain available by direct input.
 - Activated the Codex entry when app-server is available and retained a clear connection error when it is not.
-- Updated the package version to 0.2.7.
+- Updated the package version to 0.2.8.
 - Made OpenCode instance refresh tolerant of concurrent Windows file replacement and normalized both idle event forms so terminal notifications are still delivered.
 - Added controller-side OpenCode terminal polling as a fallback for API-started sessions that do not reach the plugin event hook.
 - Grouped OpenCode discovery by local server: ports run in parallel while directories on one server stay sequential, avoiding stale-port delays and local API overload.

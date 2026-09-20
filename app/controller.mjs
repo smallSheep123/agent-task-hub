@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url"
 import { createI18n } from "./locales.mjs"
 import { decodeSessionAction, encodeSessionAction, enterAgentMode, enterGlobalMode, filterAgentSessions, initializeAgentContext, migrateSessionCollections, selectAgentSession, sessionIdentity } from "./agent-context.mjs"
 import { codexTaskStartedAt, codexThreadAppearsActive, isRunningStatus, openCodeTaskStartedAt } from "./dashboard.mjs"
+import { telegramMarkdownBody } from "./telegram-markdown.mjs"
 import { approvalOptionsForRequest, approvalResponseForRequest, CodexAppServer, terminalEventFromNotification } from "../adapters/codex-app-server.mjs"
 import { chooseOpenCodeQuestionOption, completeOpenCodeQuestion, nextOpenCodeQuestionIndex, normalizeOpenCodeQuestion, openCodeQuestionAnswers, openCodeQuestionToken, submitOpenCodeQuestion } from "../adapters/opencode-question.mjs"
 
@@ -491,7 +492,7 @@ async function main(options = {}) {
   }
 
   async function send(text, extra = {}) {
-    return telegram("sendMessage", { chat_id: String(config.allowedChatId), text: compact(text, 3900), ...extra })
+    return telegram("sendMessage", { chat_id: String(config.allowedChatId), ...telegramMarkdownBody(compact(text, 3900), extra) })
   }
 
   function codexRequestToken(message, client) {
@@ -1591,8 +1592,7 @@ async function main(options = {}) {
           await telegram("editMessageText", {
             chat_id: String(config.allowedChatId),
             message_id: query.message.message_id,
-            text: compact(text, 3900),
-            reply_markup: { inline_keyboard: [] },
+            ...telegramMarkdownBody(compact(text, 3900), { reply_markup: { inline_keyboard: [] } }),
           }).catch((error) => log("WARN", `unable to update permission message: ${error.message}`))
         }
       }
@@ -1608,7 +1608,7 @@ async function main(options = {}) {
         await telegram("answerCallbackQuery", { callback_query_id: query.id, text: done ? t("openCodeQuestionAnswered") : completed ? t("questionAnswerSaved") : t("choiceUpdated") })
         if (query.message?.message_id) {
           if (done) await telegram("editMessageReplyMarkup", { chat_id: String(config.allowedChatId), message_id: query.message.message_id, reply_markup: { inline_keyboard: [] } }).catch(() => {})
-          else await telegram("editMessageText", { chat_id: String(config.allowedChatId), message_id: query.message.message_id, text: openCodeQuestionText(request), reply_markup: openCodeQuestionKeyboard(token, request) }).catch((error) => log("WARN", `unable to update question message: ${error.message}`))
+          else await telegram("editMessageText", { chat_id: String(config.allowedChatId), message_id: query.message.message_id, ...telegramMarkdownBody(openCodeQuestionText(request), { reply_markup: openCodeQuestionKeyboard(token, request) }) }).catch((error) => log("WARN", `unable to update question message: ${error.message}`))
         }
       }
       else if (/^oqs:[0-9a-f]{16}:\d+$/.test(data)) {
@@ -1622,7 +1622,7 @@ async function main(options = {}) {
         await telegram("answerCallbackQuery", { callback_query_id: query.id, text: done ? t("openCodeQuestionAnswered") : t("questionAnswerSaved") })
         if (query.message?.message_id) {
           if (done) await telegram("editMessageReplyMarkup", { chat_id: String(config.allowedChatId), message_id: query.message.message_id, reply_markup: { inline_keyboard: [] } }).catch(() => {})
-          else await telegram("editMessageText", { chat_id: String(config.allowedChatId), message_id: query.message.message_id, text: openCodeQuestionText(request), reply_markup: openCodeQuestionKeyboard(token, request) }).catch((error) => log("WARN", `unable to update question message: ${error.message}`))
+          else await telegram("editMessageText", { chat_id: String(config.allowedChatId), message_id: query.message.message_id, ...telegramMarkdownBody(openCodeQuestionText(request), { reply_markup: openCodeQuestionKeyboard(token, request) }) }).catch((error) => log("WARN", `unable to update question message: ${error.message}`))
         }
       }
       else if (/^oqr:[0-9a-f]{16}$/.test(data)) {
