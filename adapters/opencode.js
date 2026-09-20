@@ -79,7 +79,7 @@ function protectForCurrentUser(value) {
     encoding: "utf8",
     env,
     windowsHide: true,
-    timeout: 15000,
+    timeout: 45000,
   })
   if (result.status !== 0) throw new Error(`Unable to protect OpenCode local credential: ${String(result.stderr || result.error?.message || `exit ${result.status}`).trim()}`)
   return result.stdout.trim() || null

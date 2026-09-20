@@ -33,6 +33,7 @@ All notable changes to this project are documented here.
 - Added repeatable local and live read-only stress suites covering 100,000 callback operations, 100,000 Codex terminal decisions, 20,000 state migrations, 500 concurrent OpenCode events, and concurrent Codex app-server reads.
 - Clear stale Telegram polling/startup errors after a successful connection, so `/health` reports the current state instead of a recovered historical failure.
 - Isolated OpenCode approval, OpenCode question, and Codex request polling failures so one unavailable interface cannot suppress the others.
+- Increased the Windows DPAPI helper startup allowance for cold CI hosts and heavily loaded desktops.
 
 ## 0.1.0 - 2026-09-20
 
