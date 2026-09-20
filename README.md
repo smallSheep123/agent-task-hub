@@ -15,7 +15,7 @@ Agent Task Hub is a Windows-first, multilingual Telegram control center for loca
 - Browses and searches sessions with project paths and pagination.
 - Sends prompts immediately or runs per-session sequential queues with `/add` and `/batch`.
 - Recovers queues after restarts and suppresses duplicate events and notifications.
-- Presents OpenCode approvals and approvals/questions from Codex turns started through the Hub, using only decisions supported by the underlying agent.
+- Presents OpenCode approvals and choice questions from every registered local OpenCode server, plus approvals/questions from Codex turns started through the Hub, using only decisions supported by the underlying agent.
 - Shows session progress, recent replies, file-change summaries, queue state, and service health.
 - Keeps OpenCode access on loopback and opens no inbound network port.
 - Supports Simplified Chinese and English in setup, management, Telegram commands, buttons, and notifications.
@@ -49,7 +49,7 @@ Setup installs the adapter as `%USERPROFILE%\.config\opencode\plugins\agent-task
 | `/pause`, `/resume`, `/clearqueue` | Control automatic queue progress |
 | `/stop` | Stop the current task after confirmation |
 | `/approvals` | Show pending OpenCode and Codex approvals |
-| `/questions`, `/answer text` | Show or answer pending Codex questions |
+| `/questions`, `/answer text` | Show or answer pending OpenCode and Codex questions |
 | `/health`, `/status` | Show detailed or compact health information |
 
 Example:
@@ -65,7 +65,9 @@ Write a short maintenance note
 
 Each item starts after the preceding completion event. The bot reports every completion before dispatching the next item, then sends a final message when the queue is empty. Tasks started manually on the computer are reported without accidentally advancing an unrelated queue.
 
-Codex turns started through the Hub keep their live app-server connection, so approvals and questions can be answered from Telegram. For a turn started in another Codex client, the Hub detects and aggregates its terminal completion; any live approval remains in the client that started that turn.
+OpenCode questions are discovered independently of the selected Telegram mode. Single-choice options continue immediately, multi-choice questions have an explicit submit button, and free-text choices use `/answer text`.
+
+Codex turns started through the Hub keep their live app-server connection, so approvals and questions can be answered from Telegram. For a turn started in another Codex client, the Hub detects and aggregates its terminal completion; live approvals and questions remain in the client that owns that app-server connection.
 
 The main command menu stays small. Advanced queue, approval, and diagnostic commands remain accepted. Buttons carry the action, backend, and session identity, so changing modes does not require repeatedly typing identifiers.
 

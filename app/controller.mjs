@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url"
 import { createI18n } from "./locales.mjs"
 import { decodeSessionAction, encodeSessionAction, enterAgentMode, enterGlobalMode, filterAgentSessions, initializeAgentContext, migrateSessionCollections, selectAgentSession, sessionIdentity } from "./agent-context.mjs"
 import { approvalOptionsForRequest, approvalResponseForRequest, CodexAppServer, terminalEventFromNotification } from "../adapters/codex-app-server.mjs"
+import { chooseOpenCodeQuestionOption, completeOpenCodeQuestion, nextOpenCodeQuestionIndex, normalizeOpenCodeQuestion, openCodeQuestionAnswers, openCodeQuestionToken, submitOpenCodeQuestion } from "../adapters/opencode-question.mjs"
 
 const appDir = dirname(fileURLToPath(import.meta.url))
 const dataRoot = process.env.AGENT_TASK_HUB_DATA_DIR || join(homedir(), ".config", "agent-task-hub")
@@ -471,6 +472,7 @@ async function main() {
   state.recentEvents ||= {}
   state.sessionBrowser ||= { mode: "sessions", query: "", page: 1, backend: "all" }
   state.permissionRequests ||= {}
+  state.openCodeQuestions ||= {}
   state.codexRequests ||= {}
   state.lastError ||= null
   const startedAt = new Date().toISOString()
@@ -529,8 +531,9 @@ async function main() {
   async function sendCodexRequest(token, request, repeat = false) {
     const keyboard = codexRequestKeyboard(token, request)
     const message = await send(codexRequestText(request), keyboard.inline_keyboard.length ? { reply_markup: keyboard } : {})
+    request.lastPresentedAt = new Date().toISOString()
     if (!repeat || !request.notifiedAt) {
-      request.notifiedAt = new Date().toISOString()
+      request.notifiedAt = request.lastPresentedAt
       request.messageId = message?.message_id || null
       saveState()
     }
@@ -819,6 +822,185 @@ async function main() {
     throw lastError || new Error(t("approvalExpired"))
   }
 
+  function openCodeQuestionText(request) {
+    const index = nextOpenCodeQuestionIndex(request)
+    if (index < 0) return t("openCodeQuestionAnswered")
+    const question = request.questions[index]
+    const selected = new Set(request.answers?.[index] || [])
+    const options = question.options.map((option, optionIndex) => {
+      const mark = selected.has(option.label) ? "✅" : `${optionIndex + 1}.`
+      return `${mark} ${option.label}${option.description ? ` — ${option.description}` : ""}`
+    }).join("\n")
+    return compact(t(
+      "openCodeQuestion",
+      request.title || request.sessionId || t("unknownSession"),
+      request.directory || "",
+      index + 1,
+      request.questions.length,
+      question.header || t("question"),
+      question.question,
+      options || t("noOptions"),
+      question.multiple ? t("multiChoiceHint") : question.custom || !question.options.length ? t("customAnswerHint") : t("singleChoiceHint"),
+    ), 3900)
+  }
+
+  function openCodeQuestionKeyboard(token, request) {
+    const index = nextOpenCodeQuestionIndex(request)
+    if (index < 0) return { inline_keyboard: [] }
+    const question = request.questions[index]
+    const selected = new Set(request.answers?.[index] || [])
+    const rows = question.options.map((option, optionIndex) => [{
+      text: `${selected.has(option.label) ? "✅ " : ""}${option.label}`.slice(0, 55),
+      callback_data: `oqa:${token}:${index}:${optionIndex}`,
+    }])
+    if (question.multiple) rows.push([{ text: t("submitChoice"), callback_data: `oqs:${token}:${index}` }])
+    rows.push([{ text: t("rejectQuestion"), callback_data: `oqr:${token}` }])
+    return { inline_keyboard: rows }
+  }
+
+  async function sendOpenCodeQuestion(token, request, repeat = false) {
+    const message = await send(openCodeQuestionText(request), { reply_markup: openCodeQuestionKeyboard(token, request) })
+    const now = new Date().toISOString()
+    request.lastPresentedAt = now
+    if (!repeat || !request.notifiedAt) request.notifiedAt = now
+    request.messageId = message?.message_id || request.messageId || null
+    saveState()
+    return message
+  }
+
+  async function discoverPendingOpenCodeQuestions() {
+    const found = new Map()
+    const checkedScopes = new Set()
+    const unique = new Map()
+    for (const instance of loadInstances()) {
+      const base = loopbackBase(instance.serverUrl)
+      const scope = `${base}\n${String(instance.directory || "")}`
+      if (!unique.has(scope)) unique.set(scope, instance)
+    }
+    for (const instance of unique.values()) {
+      const base = loopbackBase(instance.serverUrl)
+      const directory = String(instance.directory || "")
+      const scope = `${base}\n${directory}`
+      try {
+        const query = new URLSearchParams({ directory })
+        const list = await requestJson(`${base}/question?${query}`, { headers: openCodeHeaders(instance) }, 5000)
+        checkedScopes.add(scope)
+        for (const raw of Array.isArray(list) ? list : []) {
+          const normalized = normalizeOpenCodeQuestion(raw)
+          if (!normalized) continue
+          const token = openCodeQuestionToken(base, normalized.requestId)
+          const previous = found.get(token)
+          if (previous) {
+            if (!previous.candidateDirectories.includes(directory)) previous.candidateDirectories.push(directory)
+            continue
+          }
+          const request = {
+            ...normalized,
+            serverUrl: base,
+            directory,
+            candidateDirectories: [directory],
+            answers: {},
+            completedQuestions: {},
+            firstSeenAt: new Date().toISOString(),
+            lastSeenAt: new Date().toISOString(),
+          }
+          request.title = await permissionTitle(request)
+          found.set(token, request)
+        }
+      } catch (error) {
+        log("WARN", `question scan unavailable ${base}: ${error.message}`)
+      }
+    }
+    return { found, checkedScopes }
+  }
+
+  async function refreshOpenCodeQuestions() {
+    const { found, checkedScopes } = await discoverPendingOpenCodeQuestions()
+    const now = new Date().toISOString()
+    let changed = false
+    for (const [token, current] of found) {
+      const existing = state.openCodeQuestions[token]
+      if (existing?.resolvedAt) continue
+      if (existing) {
+        Object.assign(existing, current, {
+          answers: existing.answers || {},
+          completedQuestions: existing.completedQuestions || {},
+          firstSeenAt: existing.firstSeenAt || current.firstSeenAt,
+          lastSeenAt: now,
+          notifiedAt: existing.notifiedAt || null,
+          lastPresentedAt: existing.lastPresentedAt || null,
+          messageId: existing.messageId || null,
+        })
+        if (existing.absentSince) delete existing.absentSince
+      } else {
+        state.openCodeQuestions[token] = current
+        changed = true
+      }
+      if (!state.openCodeQuestions[token].notifiedAt) await sendOpenCodeQuestion(token, state.openCodeQuestions[token])
+    }
+    for (const [token, request] of Object.entries(state.openCodeQuestions)) {
+      if (request.resolvedAt || found.has(token)) continue
+      const scopes = (request.candidateDirectories || [request.directory || ""]).map((directory) => `${loopbackBase(request.serverUrl)}\n${directory}`)
+      if (!scopes.some((scope) => checkedScopes.has(scope))) continue
+      if (!request.absentSince) {
+        request.absentSince = now
+        changed = true
+      } else if (Date.now() - Date.parse(request.absentSince) >= 30000) {
+        request.resolvedAt = now
+        request.resolution = "external"
+        changed = true
+      }
+    }
+    const cutoff = Date.now() - 7 * 86400000
+    for (const [token, request] of Object.entries(state.openCodeQuestions)) {
+      if (request.resolvedAt && Date.parse(request.resolvedAt) < cutoff) {
+        delete state.openCodeQuestions[token]
+        changed = true
+      }
+    }
+    if (changed) saveState()
+    return found
+  }
+
+  function activeOpenCodeQuestion(token) {
+    const request = state.openCodeQuestions[token]
+    if (!request || request.resolvedAt) throw new Error(t("questionExpired"))
+    return request
+  }
+
+  async function postOpenCodeQuestion(request, action, body = null) {
+    const directories = [...new Set(request.candidateDirectories || [request.directory || ""])]
+    let lastError = null
+    for (const directory of directories) {
+      try {
+        const target = { serverUrl: request.serverUrl, directory }
+        await submitOpenCodeQuestion({
+          serverUrl: loopbackBase(request.serverUrl),
+          directory,
+          requestId: request.requestId,
+          action,
+          answers: body?.answers || null,
+          headers: openCodeHeaders(target),
+        })
+        return
+      } catch (error) {
+        lastError = error
+        if (!/HTTP 404\b/.test(error.message)) throw error
+      }
+    }
+    throw lastError || new Error(t("questionExpired"))
+  }
+
+  async function finishOpenCodeQuestion(request) {
+    const answers = openCodeQuestionAnswers(request)
+    if (!answers) return false
+    await postOpenCodeQuestion(request, "reply", { answers })
+    request.resolvedAt = new Date().toISOString()
+    request.resolution = "answered"
+    saveState()
+    return true
+  }
+
   function authorizedMessage(message) {
     return message?.chat?.type === "private" && String(message.from?.id) === String(config.allowedUserId) && String(message.chat?.id) === String(config.allowedChatId)
   }
@@ -963,7 +1145,9 @@ async function main() {
     const running = Object.keys(state.queueInFlight).length
     const paused = Object.values(state.queuePaused).filter(Boolean).length
     const lastError = state.lastError ? `${state.lastError.at} [${state.lastError.scope}] ${state.lastError.message}` : t("none")
-    const approvals = Object.values(state.permissionRequests).filter((item) => !item.resolvedAt).length + Object.values(state.codexRequests).filter((item) => !item.resolvedAt).length
+    const approvals = Object.values(state.permissionRequests).filter((item) => !item.resolvedAt).length
+      + Object.values(state.openCodeQuestions).filter((item) => !item.resolvedAt).length
+      + Object.values(state.codexRequests).filter((item) => !item.resolvedAt).length
     const codex = codexClient?.ready && codexClient.isRunning ? t("online") : t("offline")
     return compact(t("health", openCode, codex, instances.length, sessions.length, state.selected?.title || t("notSelected"), approvals, running, waiting, paused, durationText(startedAt), lastError))
   }
@@ -1090,22 +1274,42 @@ async function main() {
       return
     }
     if (command.name === "questions") {
-      const pending = Object.entries(state.codexRequests).filter(([, item]) => item.kind === "question" && !item.resolvedAt && item.connectionId === codexClient?.connectionId)
-      if (!pending.length) return send(t("noQuestions"))
-      for (const [token, item] of pending.slice(0, 10)) await sendCodexRequest(token, item, true)
+      await refreshOpenCodeQuestions()
+      const openCodePending = Object.entries(state.openCodeQuestions).filter(([, item]) => !item.resolvedAt)
+      const codexPending = Object.entries(state.codexRequests).filter(([, item]) => item.kind === "question" && !item.resolvedAt && item.connectionId === codexClient?.connectionId)
+      if (!openCodePending.length && !codexPending.length) return send(t("noQuestions"))
+      for (const [token, item] of openCodePending.slice(0, 10)) await sendOpenCodeQuestion(token, item, true)
+      for (const [token, item] of codexPending.slice(0, Math.max(0, 10 - openCodePending.length))) await sendCodexRequest(token, item, true)
       return
     }
     if (command.name === "answer") {
-      const pending = Object.values(state.codexRequests)
-        .filter((item) => item.kind === "question" && !item.resolvedAt && item.connectionId === codexClient?.connectionId)
-        .filter((item) => !state.selected || state.selected.backend !== "codex" || item.params?.threadId === state.selected.id)
-        .sort((left, right) => Date.parse(right.createdAt || 0) - Date.parse(left.createdAt || 0))
-      const request = pending[0]
-      if (!request) return send(t("noQuestions"))
-      const question = (request.params?.questions || []).find((item) => !request.answers?.[item.id])
+      await refreshOpenCodeQuestions()
+      const candidates = [
+        ...Object.entries(state.openCodeQuestions).filter(([, item]) => !item.resolvedAt).map(([token, request]) => ({ backend: "opencode", token, request, sessionId: request.sessionId })),
+        ...Object.entries(state.codexRequests).filter(([, item]) => item.kind === "question" && !item.resolvedAt && item.connectionId === codexClient?.connectionId).map(([token, request]) => ({ backend: "codex", token, request, sessionId: request.params?.threadId })),
+      ].sort((left, right) => {
+        const leftTime = Date.parse(left.request.lastPresentedAt || left.request.notifiedAt || left.request.createdAt || left.request.firstSeenAt || 0)
+        const rightTime = Date.parse(right.request.lastPresentedAt || right.request.notifiedAt || right.request.createdAt || right.request.firstSeenAt || 0)
+        if (leftTime !== rightTime) return rightTime - leftTime
+        const leftSelected = state.selected?.backend === left.backend && state.selected?.id === left.sessionId ? 1 : 0
+        const rightSelected = state.selected?.backend === right.backend && state.selected?.id === right.sessionId ? 1 : 0
+        return rightSelected - leftSelected
+      })
+      const target = candidates[0]
+      if (!target) return send(t("noQuestions"))
+      if (target.backend === "opencode") {
+        const index = nextOpenCodeQuestionIndex(target.request)
+        if (index < 0) return send(t("noQuestions"))
+        completeOpenCodeQuestion(target.request, index, command.arg)
+        const done = await finishOpenCodeQuestion(target.request)
+        saveState()
+        if (!done) await sendOpenCodeQuestion(target.token, target.request, true)
+        return send(done ? t("openCodeQuestionAnswered") : t("questionAnswerSaved"))
+      }
+      const question = (target.request.params?.questions || []).find((item) => !target.request.answers?.[item.id])
       if (!question) return send(t("noQuestions"))
-      request.answers[question.id] = { answers: [command.arg] }
-      const done = completeCodexQuestionIfReady(request)
+      target.request.answers[question.id] = { answers: [command.arg] }
+      const done = completeCodexQuestionIfReady(target.request)
       saveState()
       return send(done ? t("codexQuestionAnswered") : t("codexAnswerSaved"))
     }
@@ -1263,6 +1467,45 @@ async function main() {
             reply_markup: { inline_keyboard: [] },
           }).catch((error) => log("WARN", `unable to update permission message: ${error.message}`))
         }
+      }
+      else if (/^oqa:[0-9a-f]{16}:\d+:\d+$/.test(data)) {
+        const [, token, questionText, optionText] = data.split(":")
+        const request = activeOpenCodeQuestion(token)
+        const questionIndex = Number(questionText)
+        const option = request.questions?.[questionIndex]?.options?.[Number(optionText)]
+        if (!option || questionIndex !== nextOpenCodeQuestionIndex(request)) throw new Error(t("questionExpired"))
+        const completed = chooseOpenCodeQuestionOption(request, questionIndex, option.label)
+        const done = completed ? await finishOpenCodeQuestion(request) : false
+        saveState()
+        await telegram("answerCallbackQuery", { callback_query_id: query.id, text: done ? t("openCodeQuestionAnswered") : completed ? t("questionAnswerSaved") : t("choiceUpdated") })
+        if (query.message?.message_id) {
+          if (done) await telegram("editMessageReplyMarkup", { chat_id: String(config.allowedChatId), message_id: query.message.message_id, reply_markup: { inline_keyboard: [] } }).catch(() => {})
+          else await telegram("editMessageText", { chat_id: String(config.allowedChatId), message_id: query.message.message_id, text: openCodeQuestionText(request), reply_markup: openCodeQuestionKeyboard(token, request) }).catch((error) => log("WARN", `unable to update question message: ${error.message}`))
+        }
+      }
+      else if (/^oqs:[0-9a-f]{16}:\d+$/.test(data)) {
+        const [, token, questionText] = data.split(":")
+        const request = activeOpenCodeQuestion(token)
+        const questionIndex = Number(questionText)
+        if (questionIndex !== nextOpenCodeQuestionIndex(request) || !request.questions?.[questionIndex]?.multiple) throw new Error(t("questionExpired"))
+        completeOpenCodeQuestion(request, questionIndex)
+        const done = await finishOpenCodeQuestion(request)
+        saveState()
+        await telegram("answerCallbackQuery", { callback_query_id: query.id, text: done ? t("openCodeQuestionAnswered") : t("questionAnswerSaved") })
+        if (query.message?.message_id) {
+          if (done) await telegram("editMessageReplyMarkup", { chat_id: String(config.allowedChatId), message_id: query.message.message_id, reply_markup: { inline_keyboard: [] } }).catch(() => {})
+          else await telegram("editMessageText", { chat_id: String(config.allowedChatId), message_id: query.message.message_id, text: openCodeQuestionText(request), reply_markup: openCodeQuestionKeyboard(token, request) }).catch((error) => log("WARN", `unable to update question message: ${error.message}`))
+        }
+      }
+      else if (/^oqr:[0-9a-f]{16}$/.test(data)) {
+        const [, token] = data.split(":")
+        const request = activeOpenCodeQuestion(token)
+        await postOpenCodeQuestion(request, "reject")
+        request.resolvedAt = new Date().toISOString()
+        request.resolution = "rejected"
+        saveState()
+        await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("questionRejected") })
+        if (query.message?.message_id) await telegram("editMessageReplyMarkup", { chat_id: String(config.allowedChatId), message_id: query.message.message_id, reply_markup: { inline_keyboard: [] } }).catch(() => {})
       }
       else if (/^cap:[0-9a-f]{16}:[A-Za-z]+$/.test(data)) {
         const [, token, action] = data.split(":")
@@ -1518,12 +1761,17 @@ async function main() {
 
   async function permissionLoop() {
     while (true) {
-      try {
-        await refreshPermissions()
-        await refreshCodexRequests()
-      } catch (error) {
+      try { await refreshPermissions() } catch (error) {
         recordError("permission-monitor", error)
         log("WARN", `permission monitor failed: ${error.message}`)
+      }
+      try { await refreshOpenCodeQuestions() } catch (error) {
+        recordError("question-monitor", error)
+        log("WARN", `question monitor failed: ${error.message}`)
+      }
+      try { await refreshCodexRequests() } catch (error) {
+        recordError("codex-request-monitor", error)
+        log("WARN", `Codex request monitor failed: ${error.message}`)
       }
       await sleep(5000)
     }

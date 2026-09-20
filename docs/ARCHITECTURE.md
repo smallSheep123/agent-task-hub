@@ -92,6 +92,8 @@ The OpenCode adapter never reads the Telegram token. The controller never listen
 
 OpenCode terminal events normally arrive through the plugin. The controller also polls session metadata and status every five seconds, establishing a startup baseline before emitting anything. This catches short API-started tasks and Desktop versions that omit the plugin terminal callback; the shared event fingerprinting prevents duplicate Telegram notifications.
 
+OpenCode approvals and questions are polled directly from each registered loopback server, independently of the selected Telegram agent mode. Question state stores only opaque callback tokens, selected labels, and delivery metadata. Replies are posted back to the same loopback server and directory scope. Codex approvals and questions are bidirectional server requests on the app-server transport, so only turns owned by the Hub's app-server connection can be answered from Telegram.
+
 ## Local data and isolation
 
 Runtime data is stored under:
@@ -109,7 +111,7 @@ Runtime data is stored under:
 
 The installed OpenCode adapter is `%USERPROFILE%\.config\opencode\plugins\agent-task-hub.js`, and the startup task is named `Agent Task Hub`. These identifiers do not overlap the earlier bridge project.
 
-`config.json` stores the selected locale, Telegram identity binding, and a DPAPI-protected token. Instance records contain loopback connection metadata and a DPAPI-protected temporary OpenCode credential. `state.json` stores Telegram offsets, selected sessions, queues, recovery metadata, processed-event fingerprints, and short approval callback mappings.
+`config.json` stores the selected locale, Telegram identity binding, and a DPAPI-protected token. Instance records contain loopback connection metadata and a DPAPI-protected temporary OpenCode credential. `state.json` stores Telegram offsets, selected sessions, queues, recovery metadata, processed-event fingerprints, and short approval/question callback mappings.
 
 ## Queue lifecycle
 

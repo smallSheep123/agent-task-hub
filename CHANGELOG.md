@@ -16,12 +16,14 @@ All notable changes to this project are documented here.
 - Added Codex command, file-change, and permission approvals plus option and free-text user-input replies.
 - Added polling for terminal turns written by another local Codex client, with a startup baseline that suppresses historical notifications.
 - Added unit tests and a read-only `npm run smoke:codex` integration check.
+- Added OpenCode question discovery and Telegram replies for single-choice, multi-choice, free-text, and rejected questions, independent of the selected agent mode.
+- Unified `/questions` and `/answer` across OpenCode and Codex, with newest-presented routing when both agents are waiting.
 
 ### Changed
 
 - Reduced the visible Telegram command menu to the common daily operations; advanced commands remain available by direct input.
 - Activated the Codex entry when app-server is available and retained a clear connection error when it is not.
-- Updated the package version to 0.2.4.
+- Updated the package version to 0.2.5.
 - Made OpenCode instance refresh tolerant of concurrent Windows file replacement and normalized both idle event forms so terminal notifications are still delivered.
 - Added controller-side OpenCode terminal polling as a fallback for API-started sessions that do not reach the plugin event hook.
 - Grouped OpenCode discovery by local server: ports run in parallel while directories on one server stay sequential, avoiding stale-port delays and local API overload.
@@ -30,6 +32,7 @@ All notable changes to this project are documented here.
 - Suppressed transient externally-polled Codex `interrupted` states without `completedAt` and only report the latest turn, so a new question cannot turn an in-progress Desktop reply into a false interruption notification.
 - Added repeatable local and live read-only stress suites covering 100,000 callback operations, 100,000 Codex terminal decisions, 20,000 state migrations, 500 concurrent OpenCode events, and concurrent Codex app-server reads.
 - Clear stale Telegram polling/startup errors after a successful connection, so `/health` reports the current state instead of a recovered historical failure.
+- Isolated OpenCode approval, OpenCode question, and Codex request polling failures so one unavailable interface cannot suppress the others.
 
 ## 0.1.0 - 2026-09-20
 
