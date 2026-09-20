@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { escapeMarkdownV2, markdownCode, telegramMarkdown, telegramMarkdownBody } from "../app/telegram-markdown.mjs"
+import { escapeMarkdownV2, markdownCode, markdownRichInline, telegramMarkdown, telegramMarkdownBody } from "../app/telegram-markdown.mjs"
 
 assert.equal(escapeMarkdownV2("a_b [c](d).js + 1!"), "a\\_b \\[c\\]\\(d\\)\\.js \\+ 1\\!")
 assert.equal(markdownCode("D:\\A_B\\`draft`"), "`D:\\\\A_B\\\\\\`draft\\``")
@@ -26,6 +26,20 @@ Fixed _all_ [items].`)
 assert.match(details, /\*状态：\* `busy`/)
 assert.match(details, /\*目录：\* `D:\\\\AIGC\\\\project_v2`/)
 assert.ok(details.includes("*最近回复：*\n>Fixed \\_all\\_ \\[items\\]\\."))
+
+const richReply = telegramMarkdown(`✅ [Codex] 任务已完成
+
+最近回复：
+已经完成 **Telegram MarkdownV2** 并上线。
+
+- 使用 \`/home\` 查看
+- [GitHub CI](https://github.com/example/repo/actions/runs/1)
+- [本地文件](C:/work/file.md)`)
+assert.ok(richReply.includes(">已经完成 *Telegram MarkdownV2* 并上线。"))
+assert.ok(richReply.includes(">• 使用 `/home` 查看"))
+assert.ok(richReply.includes(">• [GitHub CI](https://github.com/example/repo/actions/runs/1)"))
+assert.ok(richReply.includes(">• 本地文件 `C:/work/file.md`"))
+assert.equal(markdownRichInline("**bold** _plain_"), "*bold* \\_plain\\_")
 
 const help = telegramMarkdown("Agent Task Hub\n\n/add 内容 — 追加队列")
 assert.match(help, /`\/add 内容` — 追加队列/)

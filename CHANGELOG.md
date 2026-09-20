@@ -22,12 +22,13 @@ All notable changes to this project are documented here.
 - Detect Codex Desktop-owned work whose separate app-server view reports `notLoaded` while the latest persisted turn has `startedAt` but no `completedAt`; probe only recent and preferred tasks to keep the dashboard responsive.
 - Added safe Telegram MarkdownV2 rendering for dashboard, session, queue, approval, question, help, and completion messages, including bold headings, inline status/path values, quoted assistant replies, and automatic escaping of dynamic content.
 - Redesigned session pages with clear number badges and separate metadata, title, and directory rows; restricted field styling to known labels so colons inside titles and Windows paths cannot cause accidental bold text.
+- Render common Markdown inside quoted agent replies (bold, inline code, lists, headings, web links, and readable local-file references) and disable large Telegram link previews in task notifications.
 
 ### Changed
 
 - Reduced the visible Telegram command menu to the common daily operations; advanced commands remain available by direct input.
 - Activated the Codex entry when app-server is available and retained a clear connection error when it is not.
-- Updated the package version to 0.2.8.
+- Updated the package version to 0.2.9.
 - Made OpenCode instance refresh tolerant of concurrent Windows file replacement and normalized both idle event forms so terminal notifications are still delivered.
 - Added controller-side OpenCode terminal polling as a fallback for API-started sessions that do not reach the plugin event hook.
 - Grouped OpenCode discovery by local server: ports run in parallel while directories on one server stay sequential, avoiding stale-port delays and local API overload.

@@ -492,7 +492,10 @@ async function main(options = {}) {
   }
 
   async function send(text, extra = {}) {
-    return telegram("sendMessage", { chat_id: String(config.allowedChatId), ...telegramMarkdownBody(compact(text, 3900), extra) })
+    return telegram("sendMessage", {
+      chat_id: String(config.allowedChatId),
+      ...telegramMarkdownBody(compact(text, 3900), { link_preview_options: { is_disabled: true }, ...extra }),
+    })
   }
 
   function codexRequestToken(message, client) {

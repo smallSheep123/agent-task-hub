@@ -35,6 +35,45 @@ export function markdownQuote(value) {
   return String(value ?? "").split("\n").map((line) => `>${escapeMarkdownV2(line)}`).join("\n")
 }
 
+function markdownLinkUrl(value) {
+  return String(value ?? "").replace(/\\/g, "\\\\").replace(/\)/g, "\\)")
+}
+
+export function markdownRichInline(value) {
+  const input = String(value ?? "")
+  const token = /(\*\*([^*\n]+)\*\*|__([^_\n]+)__|`([^`\n]+)`|\[([^\]\n]+)\]\(([^\s)]+)\))/g
+  let output = ""
+  let cursor = 0
+  for (const match of input.matchAll(token)) {
+    output += escapeMarkdownV2(input.slice(cursor, match.index))
+    const bold = match[2] ?? match[3]
+    if (bold !== undefined) output += markdownBold(bold)
+    else if (match[4] !== undefined) output += markdownCode(match[4])
+    else {
+      const label = match[5]
+      const destination = match[6]
+      output += /^https?:\/\//i.test(destination)
+        ? `[${escapeMarkdownV2(label)}](${markdownLinkUrl(destination)})`
+        : `${escapeMarkdownV2(label)} ${markdownCode(destination)}`
+    }
+    cursor = Number(match.index) + match[0].length
+  }
+  return output + escapeMarkdownV2(input.slice(cursor))
+}
+
+export function markdownRichQuoteLine(value) {
+  const line = String(value ?? "")
+  const heading = line.match(/^\s{0,3}#{1,6}\s+(.+)$/)
+  if (heading) return `>${markdownBold(heading[1])}`
+  const bullet = line.match(/^\s*[-*+]\s+(.+)$/)
+  if (bullet) return `>• ${markdownRichInline(bullet[1])}`
+  const numbered = line.match(/^\s*(\d{1,3})[.)]\s+(.+)$/)
+  if (numbered) return `>${escapeMarkdownV2(`${numbered[1]}.`)} ${markdownRichInline(numbered[2])}`
+  const nestedQuote = line.match(/^\s*>\s?(.*)$/)
+  if (nestedQuote) return `>▌ ${markdownRichInline(nestedQuote[1])}`
+  return `>${markdownRichInline(line)}`
+}
+
 function labelLine(line) {
   const match = String(line).match(/^\s*([^：:\r\n]{2,32})([：:])(?:\s*)(.*)$/u)
   if (!match) return null
@@ -65,7 +104,7 @@ function renderMarkdown(value) {
       quoteSection = true
       return markdownBold(trimmed)
     }
-    if (quoteToEnd) return markdownQuote(line)
+    if (quoteToEnd) return markdownRichQuoteLine(line)
 
     const labeled = labelLine(line)
     if (quoteSection && labeled) quoteSection = false
