@@ -74,6 +74,26 @@ export function markdownRichQuoteLine(value) {
   return `>${markdownRichInline(line)}`
 }
 
+const LANGUAGE_ALIASES = new Map([
+  ["sh", "bash"], ["shell", "bash"], ["zsh", "bash"],
+  ["ps1", "powershell"], ["pwsh", "powershell"],
+  ["js", "javascript"], ["jsx", "javascript"],
+  ["ts", "typescript"], ["tsx", "typescript"],
+  ["py", "python"], ["rb", "ruby"], ["rs", "rust"],
+  ["c++", "cpp"], ["c#", "csharp"], ["yml", "yaml"],
+  ["md", "markdown"], ["plaintext", "text"], ["txt", "text"],
+])
+
+export function markdownCodeLanguage(value) {
+  const input = String(value ?? "").trim().toLowerCase()
+  const normalized = LANGUAGE_ALIASES.get(input) || input
+  return /^[a-z][a-z0-9_-]{0,23}$/.test(normalized) ? normalized : ""
+}
+
+export function markdownPreLine(value) {
+  return String(value ?? "").replace(/\\/g, "\\\\").replace(/`/g, "\\`")
+}
+
 function labelLine(line) {
   const match = String(line).match(/^\s*([^：:\r\n]{2,32})([：:])(?:\s*)(.*)$/u)
   if (!match) return null
@@ -87,8 +107,19 @@ function renderMarkdown(value) {
   const firstContent = lines.findIndex((line) => line.trim())
   let quoteToEnd = false
   let quoteSection = false
-  return lines.map((line, index) => {
+  let fencedCode = false
+  const rendered = lines.map((line, index) => {
     const trimmed = line.trim()
+    const fence = trimmed.match(/^```([^`]*)$/)
+    if (quoteToEnd && fence) {
+      if (fencedCode) {
+        fencedCode = false
+        return "```"
+      }
+      fencedCode = true
+      return `\`\`\`${markdownCodeLanguage(fence[1])}`
+    }
+    if (fencedCode) return markdownPreLine(line)
     if (!trimmed) {
       if (quoteToEnd) return ">"
       quoteSection = false
@@ -123,7 +154,9 @@ function renderMarkdown(value) {
       return `${markdownBold(`${labeled.label}${line.includes("：") ? "：" : ":"}`)}${renderedValue ? ` ${renderedValue}` : ""}`
     }
     return escapeMarkdownV2(line)
-  }).join("\n")
+  })
+  if (fencedCode) rendered.push("```")
+  return rendered.join("\n")
 }
 
 export function telegramMarkdown(value, maxLength = 4000) {

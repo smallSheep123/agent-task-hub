@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { escapeMarkdownV2, markdownCode, markdownRichInline, telegramMarkdown, telegramMarkdownBody } from "../app/telegram-markdown.mjs"
+import { escapeMarkdownV2, markdownCode, markdownCodeLanguage, markdownRichInline, telegramMarkdown, telegramMarkdownBody } from "../app/telegram-markdown.mjs"
 
 assert.equal(escapeMarkdownV2("a_b [c](d).js + 1!"), "a\\_b \\[c\\]\\(d\\)\\.js \\+ 1\\!")
 assert.equal(markdownCode("D:\\A_B\\`draft`"), "`D:\\\\A_B\\\\\\`draft\\``")
@@ -40,6 +40,27 @@ assert.ok(richReply.includes(">• 使用 `/home` 查看"))
 assert.ok(richReply.includes(">• [GitHub CI](https://github.com/example/repo/actions/runs/1)"))
 assert.ok(richReply.includes(">• 本地文件 `C:/work/file.md`"))
 assert.equal(markdownRichInline("**bold** _plain_"), "*bold* \\_plain\\_")
+
+const fencedReply = telegramMarkdown(`✅ [Codex] 任务已完成
+
+最近回复：
+请运行：
+\`\`\`shell
+tailscale ping <device>
+echo \`date\`
+\`\`\`
+然后检查 JSON：
+\`\`\`json
+{"direct": "43.200.213.212:41641"}
+\`\`\``)
+assert.ok(fencedReply.includes(">请运行：\n```bash\ntailscale ping <device>\necho \\`date\\`\n```"))
+assert.ok(fencedReply.includes(">然后检查 JSON：\n```json\n{\"direct\": \"43.200.213.212:41641\"}\n```"))
+assert.equal(markdownCodeLanguage("ps1"), "powershell")
+assert.equal(markdownCodeLanguage("C++"), "cpp")
+assert.equal(markdownCodeLanguage("../../bad"), "")
+
+const unclosedFence = telegramMarkdown("Title\n\n最近回复：\n```python\nprint('ok')")
+assert.ok(unclosedFence.endsWith("\n```"))
 
 const help = telegramMarkdown("Agent Task Hub\n\n/add 内容 — 追加队列")
 assert.match(help, /`\/add 内容` — 追加队列/)
