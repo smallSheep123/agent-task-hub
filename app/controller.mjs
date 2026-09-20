@@ -922,6 +922,7 @@ async function main() {
       const existing = state.openCodeQuestions[token]
       if (existing?.resolvedAt) continue
       if (existing) {
+        const previousMetadata = JSON.stringify({ questions: existing.questions, title: existing.title, directory: existing.directory, candidateDirectories: existing.candidateDirectories })
         Object.assign(existing, current, {
           answers: existing.answers || {},
           completedQuestions: existing.completedQuestions || {},
@@ -931,7 +932,12 @@ async function main() {
           lastPresentedAt: existing.lastPresentedAt || null,
           messageId: existing.messageId || null,
         })
-        if (existing.absentSince) delete existing.absentSince
+        if (existing.absentSince) {
+          delete existing.absentSince
+          changed = true
+        }
+        const currentMetadata = JSON.stringify({ questions: existing.questions, title: existing.title, directory: existing.directory, candidateDirectories: existing.candidateDirectories })
+        if (previousMetadata !== currentMetadata) changed = true
       } else {
         state.openCodeQuestions[token] = current
         changed = true
