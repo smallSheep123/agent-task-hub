@@ -6,6 +6,7 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { createI18n } from "./locales.mjs"
 import { decodeSessionAction, encodeSessionAction, enterAgentMode, enterGlobalMode, filterAgentSessions, initializeAgentContext, migrateSessionCollections, selectAgentSession, sessionIdentity } from "./agent-context.mjs"
+import { approvalOptionsForRequest, approvalResponseForRequest, CodexAppServer, terminalEventFromNotification } from "../adapters/codex-app-server.mjs"
 
 const appDir = dirname(fileURLToPath(import.meta.url))
 const dataRoot = process.env.AGENT_TASK_HUB_DATA_DIR || join(homedir(), ".config", "agent-task-hub")
@@ -19,6 +20,39 @@ const decryptScript = join(appDir, "decrypt-token.ps1")
 const credentialCache = new Map()
 let i18n = createI18n("en-US")
 const t = (key, ...args) => i18n.t(key, ...args)
+let codexClient = null
+let codexStartPromise = null
+let codexLastError = null
+let codexRetryAfter = 0
+
+async function ensureCodexClient(command = null) {
+  if (codexClient?.ready && codexClient.isRunning) return codexClient
+  if (codexStartPromise) return codexStartPromise
+  if (Date.now() < codexRetryAfter && codexLastError) throw codexLastError
+  codexStartPromise = (async () => {
+    const client = new CodexAppServer({ command: command || process.env.AGENT_TASK_HUB_CODEX_COMMAND || "codex" })
+    try {
+      await client.start()
+      codexClient = client
+      codexLastError = null
+      codexRetryAfter = 0
+      client.once("exit", ({ detail }) => {
+        if (codexClient === client) codexClient = null
+        codexLastError = new Error(detail || "Codex app-server stopped")
+        codexRetryAfter = Date.now() + 15000
+      })
+      return client
+    } catch (error) {
+      await client.stop().catch(() => {})
+      codexLastError = error
+      codexRetryAfter = Date.now() + 60000
+      throw error
+    } finally {
+      codexStartPromise = null
+    }
+  })()
+  return codexStartPromise
+}
 
 function cleanWindowsPowerShellEnv() {
   const env = { ...process.env }
@@ -143,6 +177,8 @@ export function parseCommand(text) {
   if (/^\/stop(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "stop" }
   if (/^\/health(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "health" }
   if (/^\/approvals(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "approvals" }
+  if (/^\/questions(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "questions" }
+  if ((match = value.match(/^\/answer(?:@[A-Za-z0-9_]+)?\s+([\s\S]{1,1000})$/i))) return { name: "answer", arg: match[1].trim() }
   return null
 }
 
@@ -259,7 +295,7 @@ function loadInstances() {
     .filter((item) => { try { loopbackBase(item.serverUrl); return true } catch { return false } })
 }
 
-async function discoverSessions() {
+async function discoverOpenCodeSessions() {
   const combined = new Map()
   for (const instance of loadInstances()) {
     try {
@@ -292,6 +328,24 @@ async function discoverSessions() {
   return [...combined.values()].sort((a, b) => b.updated - a.updated)
 }
 
+async function discoverSessions() {
+  const openCode = await discoverOpenCodeSessions()
+  let codex = []
+  try {
+    const client = await ensureCodexClient()
+    codex = await client.listSessions({ limit: 200 })
+  } catch (error) {
+    codexLastError = error
+    log("WARN", `Codex adapter unavailable: ${error.message}`)
+  }
+  const updated = (item) => {
+    let value = Number(item.updated || item.updatedAt || 0)
+    if (value > 0 && value < 1e12) value *= 1000
+    return value
+  }
+  return [...openCode, ...codex].sort((left, right) => updated(right) - updated(left))
+}
+
 function latestAssistant(messages) {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     if (messages[i]?.info?.role !== "assistant") continue
@@ -302,6 +356,15 @@ function latestAssistant(messages) {
 }
 
 async function getSessionView(session) {
+  if ((session.backend || "opencode") === "codex") {
+    const client = await ensureCodexClient()
+    const thread = await client.readThread(session.id)
+    const turns = Array.isArray(thread?.turns) ? thread.turns : []
+    const latestTurn = [...turns].reverse().find((turn) => Array.isArray(turn?.items))
+    const latest = [...(latestTurn?.items || [])].reverse().find((item) => item?.type === "agentMessage" || item?.type === "exitedReviewMode")
+    const status = typeof thread?.status === "string" ? thread.status : thread?.status?.type || session.status || "idle"
+    return compact(t("codexSessionView", thread?.name || thread?.preview || session.title, status, thread?.cwd || session.directory, turns.length, latest?.text || latest?.review || t("noAssistantReply")))
+  }
   const id = encodeURIComponent(session.id)
   const [info, messages, todos, statuses] = await Promise.all([
     requestSessionJson(session, `/session/${id}`),
@@ -334,6 +397,7 @@ async function main() {
   state.recentEvents ||= {}
   state.sessionBrowser ||= { mode: "sessions", query: "", page: 1, backend: "all" }
   state.permissionRequests ||= {}
+  state.codexRequests ||= {}
   state.lastError ||= null
   const startedAt = new Date().toISOString()
   let telegramReady = false
@@ -351,6 +415,126 @@ async function main() {
 
   async function send(text, extra = {}) {
     return telegram("sendMessage", { chat_id: String(config.allowedChatId), text: compact(text, 3900), ...extra })
+  }
+
+  function codexRequestToken(message, client) {
+    return createHash("sha256").update(`${client.connectionId}\n${String(message.id)}\n${message.method}\n${message.params?.threadId || ""}`).digest("hex").slice(0, 16)
+  }
+
+  function codexRequestText(request) {
+    const params = request.params || {}
+    const title = (state.sessionMap || []).find((item) => item.backend === "codex" && item.id === params.threadId)?.title || params.threadId || t("unknownSession")
+    if (request.kind === "question") {
+      const questions = (params.questions || []).map((question, index) => `${index + 1}. ${question.header ? `[${question.header}] ` : ""}${question.question}`).join("\n")
+      return t("codexQuestion", title, questions)
+    }
+    const type = ({
+      "item/commandExecution/requestApproval": t("codexCommandApproval"),
+      "item/fileChange/requestApproval": t("codexFileApproval"),
+      "item/permissions/requestApproval": t("codexPermissionApproval"),
+    })[request.method] || request.method
+    const detail = params.command ? (Array.isArray(params.command) ? params.command.join(" ") : params.command)
+      : params.permissions ? JSON.stringify(params.permissions)
+        : params.reason || t("none")
+    return t("codexApproval", title, type, params.cwd || "", params.reason || "", compact(detail, 1200))
+  }
+
+  function codexRequestKeyboard(token, request) {
+    if (request.kind === "question") {
+      const rows = []
+      for (const [questionIndex, question] of (request.params?.questions || []).entries()) {
+        for (const [optionIndex, option] of (question.options || []).entries()) {
+          rows.push([{ text: `${questionIndex + 1}. ${option.label}`.slice(0, 55), callback_data: `cqa:${token}:${questionIndex}:${optionIndex}` }])
+        }
+      }
+      return { inline_keyboard: rows }
+    }
+    return { inline_keyboard: approvalOptionsForRequest(request.method, request.params).map((option) => [{ text: t(option.labelKey), callback_data: `cap:${token}:${option.action}` }]) }
+  }
+
+  async function sendCodexRequest(token, request, repeat = false) {
+    const keyboard = codexRequestKeyboard(token, request)
+    const message = await send(codexRequestText(request), keyboard.inline_keyboard.length ? { reply_markup: keyboard } : {})
+    if (!repeat || !request.notifiedAt) {
+      request.notifiedAt = new Date().toISOString()
+      request.messageId = message?.message_id || null
+      saveState()
+    }
+  }
+
+  async function refreshCodexRequests() {
+    if (!codexClient?.ready) return
+    const pending = Object.entries(state.codexRequests)
+      .filter(([, request]) => !request.resolvedAt && !request.notifiedAt && request.connectionId === codexClient.connectionId)
+      .slice(0, 10)
+    for (const [token, request] of pending) await sendCodexRequest(token, request)
+  }
+
+  async function handleCodexServerRequest(message, client) {
+    if (message.method === "currentTime/read") {
+      client.respond(message.id, { currentTimeAt: Math.floor(Date.now() / 1000) })
+      return
+    }
+    const approvalMethods = new Set(["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval"])
+    const question = message.method === "item/tool/requestUserInput"
+    if (!approvalMethods.has(message.method) && !question) {
+      client.respondError(message.id, -32601, "Agent Task Hub does not implement this app-server request")
+      log("WARN", `unsupported Codex server request method=${message.method}`)
+      return
+    }
+    const token = codexRequestToken(message, client)
+    state.codexRequests[token] = {
+      requestId: message.id,
+      method: message.method,
+      params: message.params || {},
+      kind: question ? "question" : "approval",
+      connectionId: client.connectionId,
+      answers: {},
+      createdAt: new Date().toISOString(),
+      notifiedAt: null,
+      resolvedAt: null,
+    }
+    saveState()
+    await sendCodexRequest(token, state.codexRequests[token])
+  }
+
+  function activeCodexRequest(token) {
+    const request = state.codexRequests[token]
+    if (!request || request.resolvedAt || !codexClient?.ready || request.connectionId !== codexClient.connectionId) throw new Error(t("codexRequestExpired"))
+    return request
+  }
+
+  function completeCodexQuestionIfReady(request) {
+    const questions = request.params?.questions || []
+    if (!questions.length || questions.some((question) => !request.answers?.[question.id])) return false
+    codexClient.respond(request.requestId, { answers: request.answers })
+    request.resolvedAt = new Date().toISOString()
+    request.resolution = "answered"
+    saveState()
+    return true
+  }
+
+  async function handleCodexTerminal(event) {
+    const name = `${Date.now()}-${randomUUID()}.json`
+    atomicJson(join(eventsDir, name), event)
+  }
+
+  async function attachCodexAdapter() {
+    const client = await ensureCodexClient(config.codexCommand || null)
+    if (client.agentTaskHubAttached) return client
+    client.agentTaskHubAttached = true
+    for (const request of Object.values(state.codexRequests)) {
+      if (!request.resolvedAt && request.connectionId !== client.connectionId) {
+        request.resolvedAt = new Date().toISOString()
+        request.resolution = "connection-closed"
+      }
+    }
+    saveState()
+    client.on("terminal", (event) => { void handleCodexTerminal(event).catch((error) => recordError("codex-event", error)) })
+    client.on("serverRequest", (message) => { void handleCodexServerRequest(message, client).catch((error) => recordError("codex-request", error)) })
+    client.on("diagnostic", (message) => { if (message) log("INFO", `Codex app-server: ${message}`) })
+    await client.startMonitor({ intervalMs: Number(config.codexPollIntervalMs || 5000), limit: Number(config.codexMonitorLimit || 100) })
+    return client
   }
 
   function permissionKeyboard(token) {
@@ -578,6 +762,10 @@ async function main() {
 
   async function currentSessionStatus(session) {
     try {
+      if ((session.backend || "opencode") === "codex") {
+        const client = await ensureCodexClient(config.codexCommand || null)
+        return await client.status(session.id)
+      }
       const statuses = await requestSessionJson(session, "/session/status")
       return statuses?.[session.id]?.type || "idle"
     } catch {
@@ -596,11 +784,17 @@ async function main() {
     state.queueStartOnIdle[key] = false
     saveState()
     try {
-      await requestSessionJson(session, `/session/${encodeURIComponent(session.id)}/prompt_async`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ parts: [{ type: "text", text: item.text }] }),
-      })
+      if ((session.backend || "opencode") === "codex") {
+        const client = await ensureCodexClient(config.codexCommand || null)
+        const turn = await client.sendPrompt(session.id, item.text)
+        item.turnId = turn?.id || null
+      } else {
+        await requestSessionJson(session, `/session/${encodeURIComponent(session.id)}/prompt_async`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ parts: [{ type: "text", text: item.text }] }),
+        })
+      }
       item.dispatchState = "sent"
       item.sentAt = new Date().toISOString()
       state.queueInFlight[key] = item
@@ -657,8 +851,9 @@ async function main() {
     const running = Object.keys(state.queueInFlight).length
     const paused = Object.values(state.queuePaused).filter(Boolean).length
     const lastError = state.lastError ? `${state.lastError.at} [${state.lastError.scope}] ${state.lastError.message}` : t("none")
-    const approvals = Object.values(state.permissionRequests).filter((item) => !item.resolvedAt).length
-    return compact(t("health", openCode, instances.length, sessions.length, state.selected?.title || t("notSelected"), approvals, running, waiting, paused, durationText(startedAt), lastError))
+    const approvals = Object.values(state.permissionRequests).filter((item) => !item.resolvedAt).length + Object.values(state.codexRequests).filter((item) => !item.resolvedAt).length
+    const codex = codexClient?.ready && codexClient.isRunning ? t("online") : t("offline")
+    return compact(t("health", openCode, codex, instances.length, sessions.length, state.selected?.title || t("notSelected"), approvals, running, waiting, paused, durationText(startedAt), lastError))
   }
 
   function backendText(backend) {
@@ -681,16 +876,21 @@ async function main() {
     enterGlobalMode(state)
     saveState()
     const sessions = await discoverSessions()
-    return send(t("home", modeText(), state.selected ? `${backendText(state.selected.backend)} · ${state.selected.title}` : t("notSelected"), filterAgentSessions(sessions, "opencode").length, t("codexNotConnected")), { reply_markup: homeKeyboard() })
+    const codexCount = filterAgentSessions(sessions, "codex").length
+    const codexState = codexClient?.ready && codexClient.isRunning ? t("sessionCount", codexCount) : t("codexNotConnected")
+    return send(t("home", modeText(), state.selected ? `${backendText(state.selected.backend)} · ${state.selected.title}` : t("notSelected"), filterAgentSessions(sessions, "opencode").length, codexState), { reply_markup: homeKeyboard() })
   }
 
   async function commandAgent(backend) {
     enterAgentMode(state, backend)
     if (backend === "codex") {
-      state.sessionMap = []
-      state.sessionBrowser = { mode: "sessions", query: "", page: 1, backend: "codex" }
       saveState()
-      return send(t("codexUnavailable"), { reply_markup: { inline_keyboard: [[{ text: t("buttonHome"), callback_data: "home" }, { text: t("buttonOpenCode"), callback_data: "agent:opencode" }]] } })
+      try {
+        await attachCodexAdapter()
+        return commandSessions(1, "", "codex")
+      } catch (error) {
+        return send(t("codexUnavailable", compact(error.message, 300)), { reply_markup: { inline_keyboard: [[{ text: t("buttonHome"), callback_data: "home" }, { text: t("buttonOpenCode"), callback_data: "agent:opencode" }]] } })
+      }
     }
     saveState()
     return commandSessions(1, "", "opencode")
@@ -703,7 +903,7 @@ async function main() {
       instanceId: session.instanceId || null,
       title: session.title,
       directory: session.directory,
-      serverUrl: loopbackBase(session.serverUrl),
+      serverUrl: (session.backend || "opencode") === "opencode" ? loopbackBase(session.serverUrl) : null,
       status: session.status || "idle",
       auth: session.auth || null,
     }
@@ -754,8 +954,9 @@ async function main() {
   async function resolveSelected() {
     if (state.viewMode !== "agent" || !state.selected) return null
     if ((state.selected.backend || "opencode") !== state.activeBackend) return null
-    if (state.activeBackend !== "opencode") return null
-    loopbackBase(state.selected.serverUrl)
+    if (state.activeBackend === "opencode") loopbackBase(state.selected.serverUrl)
+    else if (state.activeBackend === "codex") await attachCodexAdapter()
+    else return null
     return state.selected
   }
 
@@ -765,14 +966,36 @@ async function main() {
     if (command.name === "home") return commandHome()
     if (command.name === "opencode") return commandAgent("opencode")
     if (command.name === "codex") return commandAgent("codex")
-    if (command.name === "status") return send(t("status", loadInstances().length, modeText(), state.selected ? `${backendText(state.selected.backend)} · ${state.selected.title}` : t("notSelected")))
+    if (command.name === "status") return send(t("status", loadInstances().length, codexClient?.ready && codexClient.isRunning ? t("online") : t("offline"), modeText(), state.selected ? `${backendText(state.selected.backend)} · ${state.selected.title}` : t("notSelected")))
     if (command.name === "health") return send(await healthText())
     if (command.name === "approvals") {
       await refreshPermissions()
       const pending = Object.entries(state.permissionRequests).filter(([, item]) => !item.resolvedAt)
-      if (!pending.length) return send(t("noApprovals"))
+      const codexPending = Object.entries(state.codexRequests).filter(([, item]) => item.kind === "approval" && !item.resolvedAt && item.connectionId === codexClient?.connectionId)
+      if (!pending.length && !codexPending.length) return send(t("noApprovals"))
       for (const [token, item] of pending.slice(0, 10)) await sendPermissionRequest(token, item, true)
+      for (const [token, item] of codexPending.slice(0, 10)) await sendCodexRequest(token, item, true)
       return
+    }
+    if (command.name === "questions") {
+      const pending = Object.entries(state.codexRequests).filter(([, item]) => item.kind === "question" && !item.resolvedAt && item.connectionId === codexClient?.connectionId)
+      if (!pending.length) return send(t("noQuestions"))
+      for (const [token, item] of pending.slice(0, 10)) await sendCodexRequest(token, item, true)
+      return
+    }
+    if (command.name === "answer") {
+      const pending = Object.values(state.codexRequests)
+        .filter((item) => item.kind === "question" && !item.resolvedAt && item.connectionId === codexClient?.connectionId)
+        .filter((item) => !state.selected || state.selected.backend !== "codex" || item.params?.threadId === state.selected.id)
+        .sort((left, right) => Date.parse(right.createdAt || 0) - Date.parse(left.createdAt || 0))
+      const request = pending[0]
+      if (!request) return send(t("noQuestions"))
+      const question = (request.params?.questions || []).find((item) => !request.answers?.[item.id])
+      if (!question) return send(t("noQuestions"))
+      request.answers[question.id] = { answers: [command.arg] }
+      const done = completeCodexQuestionIfReady(request)
+      saveState()
+      return send(done ? t("codexQuestionAnswered") : t("codexAnswerSaved"))
     }
     if (command.name === "sessions") {
       enterGlobalMode(state)
@@ -780,7 +1003,6 @@ async function main() {
       return commandSessions(command.arg || 1, "", "all")
     }
     if (command.name === "find") {
-      if (state.viewMode === "agent" && state.activeBackend === "codex") return send(t("codexUnavailable"))
       return commandSessions(1, command.arg, state.viewMode === "agent" ? state.activeBackend : "all")
     }
     if (command.name === "use") {
@@ -795,7 +1017,6 @@ async function main() {
       return session ? selectSession(session) : send(t("sessionNotFound"))
     }
     if (command.name === "current") {
-      if (state.viewMode === "agent" && state.activeBackend === "codex") return send(t("codexUnavailable"))
       if (state.viewMode !== "agent") return commandHome()
       const selected = await resolveSelected()
       return selected ? send(t("selected", backendText(selected.backend), selected.title, selected.id, selected.directory)) : send(t("selectFirst"))
@@ -885,13 +1106,18 @@ async function main() {
       return send(t("confirmClear", count), { reply_markup: { inline_keyboard: [[{ text: t("confirmClearButton"), callback_data: encodeSessionAction("clearq", selected) }, { text: t("cancel"), callback_data: "cancel" }]] } })
     }
     if (command.name === "send") {
-      const id = encodeURIComponent(selected.id)
-      await requestSessionJson(selected, `/session/${id}/prompt_async`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ parts: [{ type: "text", text: command.arg }] }),
-      })
-      return send(t("sent"))
+      if ((selected.backend || "opencode") === "codex") {
+        const client = await ensureCodexClient(config.codexCommand || null)
+        await client.sendPrompt(selected.id, command.arg)
+      } else {
+        const id = encodeURIComponent(selected.id)
+        await requestSessionJson(selected, `/session/${id}/prompt_async`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ parts: [{ type: "text", text: command.arg }] }),
+        })
+      }
+      return send(t("sentAgent", backendText(selected.backend)))
     }
     if (command.name === "stop") {
       return send(t("confirmStop", selected.title), { reply_markup: { inline_keyboard: [[{ text: t("confirmStopButton"), callback_data: encodeSessionAction("abort", selected) }, { text: t("cancel"), callback_data: "cancel" }]] } })
@@ -925,6 +1151,31 @@ async function main() {
             reply_markup: { inline_keyboard: [] },
           }).catch((error) => log("WARN", `unable to update permission message: ${error.message}`))
         }
+      }
+      else if (/^cap:[0-9a-f]{16}:[A-Za-z]+$/.test(data)) {
+        const [, token, action] = data.split(":")
+        const request = activeCodexRequest(token)
+        if (request.kind !== "approval") throw new Error(t("alreadyHandled"))
+        const result = approvalResponseForRequest(request.method, request.params, action)
+        codexClient.respond(request.requestId, result)
+        request.resolvedAt = new Date().toISOString()
+        request.resolution = action
+        saveState()
+        await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("codexApprovalHandled") })
+        if (query.message?.message_id) await telegram("editMessageReplyMarkup", { chat_id: String(config.allowedChatId), message_id: query.message.message_id, reply_markup: { inline_keyboard: [] } }).catch(() => {})
+      }
+      else if (/^cqa:[0-9a-f]{16}:\d+:\d+$/.test(data)) {
+        const [, token, questionText, optionText] = data.split(":")
+        const request = activeCodexRequest(token)
+        if (request.kind !== "question") throw new Error(t("alreadyHandled"))
+        const question = request.params?.questions?.[Number(questionText)]
+        const option = question?.options?.[Number(optionText)]
+        if (!question || !option) throw new Error(t("approvalExpired"))
+        request.answers[question.id] = { answers: [option.label] }
+        const done = completeCodexQuestionIfReady(request)
+        saveState()
+        await telegram("answerCallbackQuery", { callback_query_id: query.id, text: done ? t("codexQuestionAnswered") : t("codexAnswerSaved") })
+        if (done && query.message?.message_id) await telegram("editMessageReplyMarkup", { chat_id: String(config.allowedChatId), message_id: query.message.message_id, reply_markup: { inline_keyboard: [] } }).catch(() => {})
       }
       else if (data === "noop") await telegram("answerCallbackQuery", { callback_query_id: query.id })
       else if (data === "cancel") await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("cancelled") })
@@ -964,7 +1215,7 @@ async function main() {
         const target = decodeSessionAction(data, "addhelp")
         const session = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
         if (!session) throw new Error(t("sessionUnavailable"))
-        selectAgentSession(state, { id: session.id, backend: session.backend || "opencode", instanceId: session.instanceId || null, title: session.title, directory: session.directory, serverUrl: loopbackBase(session.serverUrl), status: session.status || "idle", auth: session.auth || null })
+        selectAgentSession(state, { id: session.id, backend: session.backend || "opencode", instanceId: session.instanceId || null, title: session.title, directory: session.directory, serverUrl: (session.backend || "opencode") === "opencode" ? loopbackBase(session.serverUrl) : null, status: session.status || "idle", auth: session.auth || null })
         saveState()
         await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("setCurrent") })
         await send(t("addHelp", session.title))
@@ -988,9 +1239,14 @@ async function main() {
         state.queuePaused[key] = true
         state.queueStartOnIdle[key] = false
         saveState()
-        await requestSessionJson(selected, `/session/${encodeURIComponent(selected.id)}/abort`, { method: "POST" })
+        if ((selected.backend || "opencode") === "codex") {
+          const client = await ensureCodexClient(config.codexCommand || null)
+          await client.interrupt(selected.id)
+        } else {
+          await requestSessionJson(selected, `/session/${encodeURIComponent(selected.id)}/abort`, { method: "POST" })
+        }
         await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("stopRequested") })
-        await send(t("stopDone"))
+        await send(t("stopDoneAgent", backendText(selected.backend)))
       } else if (data.startsWith("clearq:")) {
         const target = decodeSessionAction(data, "clearq")
         const selected = await resolveSelected()
@@ -1074,6 +1330,19 @@ async function main() {
   }
 
   async function synthesizeRecoveredCompletion(session, item) {
+    if ((session.backend || "opencode") === "codex") {
+      const client = await ensureCodexClient(config.codexCommand || null)
+      const thread = await client.readThread(session.id)
+      const sentAtSeconds = Math.floor(Date.parse(item.dispatchedAt || item.createdAt || 0) / 1000)
+      const turns = Array.isArray(thread?.turns) ? thread.turns : []
+      const turn = (item.turnId ? turns.find((candidate) => candidate.id === item.turnId) : null)
+        || [...turns].reverse().find((candidate) => Number(candidate.startedAt || 0) >= sentAtSeconds - 5)
+      if (!turn || !["completed", "failed", "interrupted"].includes(turn.status)) return false
+      const payload = terminalEventFromNotification({ threadId: session.id, turn }, thread)
+      payload.recovered = true
+      atomicJson(join(eventsDir, `${Date.now()}-${randomUUID()}.json`), payload)
+      return true
+    }
     const messages = await recentSessionMessages(session)
     const sentAt = Date.parse(item.dispatchedAt || item.createdAt || 0)
     const prompt = messages.filter((message) => message?.info?.role === "user"
@@ -1144,11 +1413,26 @@ async function main() {
     while (true) {
       try {
         await refreshPermissions()
+        await refreshCodexRequests()
       } catch (error) {
         recordError("permission-monitor", error)
         log("WARN", `permission monitor failed: ${error.message}`)
       }
       await sleep(5000)
+    }
+  }
+
+  async function codexLoop() {
+    while (true) {
+      if (!codexClient?.ready || !codexClient.isRunning || !codexClient.agentTaskHubAttached) {
+        try {
+          await attachCodexAdapter()
+          log("INFO", "Codex app-server adapter connected")
+        } catch (error) {
+          recordError("codex-reconnect", error)
+        }
+      }
+      await sleep(15000)
     }
   }
 
@@ -1170,25 +1454,27 @@ async function main() {
           continue
         }
         const waiting = event.sessionId ? waitingQueue(event).length : 0
+        const isInterrupted = event.type === "session.interrupted" || event.status === "interrupted"
         const isError = event.type === "session.error"
+        const unsuccessful = isError || isInterrupted
         let queueNote = t("manualSource")
         if (matchesQueue) {
           const progress = activeQueueItem.batchTotal > 1 ? t("itemProgress", activeQueueItem.batchIndex, activeQueueItem.batchTotal) : t("queueItem")
           const next = waitingQueue(event)[0]
-          queueNote = t("queueProgress", progress, isError ? t("executionFailed") : t("completed"), durationText(activeQueueItem.dispatchedAt, Date.parse(event.createdAt || Date.now())), waiting, next ? t("nextTask", compact(next.text, 180)) : "")
-          if (isError) queueNote += t("queueAutoPaused")
+          queueNote = t("queueProgress", progress, isInterrupted ? t("interrupted") : isError ? t("executionFailed") : t("completed"), durationText(activeQueueItem.dispatchedAt, Date.parse(event.createdAt || Date.now())), waiting, next ? t("nextTask", compact(next.text, 180)) : "")
+          if (unsuccessful) queueNote += t("queueAutoPaused")
         } else if (eventKey && state.queueStartOnIdle[eventKey] && waiting) {
           queueNote += t("waitingWillStart", waiting)
         }
-        const icon = isError ? "❌" : "✅"
+        const icon = isInterrupted ? "⏹" : isError ? "❌" : "✅"
         const stats = event.summary ? t("changeStats", event.summary.files || 0, event.summary.additions || 0, event.summary.deletions || 0) : ""
         const detail = isError ? t("error", event.error || t("unknownError")) : event.excerpt ? t("latestReply", event.excerpt) : ""
-        const text = compact(t("completionAgent", icon, backendText(event.backend || "opencode"), isError ? t("executionFailed") : t("taskCompleted"), event.title, event.directory, stats, queueNote, detail))
+        const text = compact(t("completionAgent", icon, backendText(event.backend || "opencode"), isInterrupted ? t("taskInterrupted") : isError ? t("executionFailed") : t("taskCompleted"), event.title, event.directory, stats, queueNote, detail))
         try {
           await send(text, completionButtons(event))
           if (matchesQueue) {
             delete state.queueInFlight[eventKey]
-            if (isError) {
+            if (unsuccessful) {
               state.queuePaused[eventKey] = true
               state.queueStartOnIdle[eventKey] = false
             }
@@ -1206,7 +1492,7 @@ async function main() {
               recordError("queue-dispatch", error)
               await send(t("nextFailed", compact(error.message, 300))).catch(() => {})
             }
-          } else if (matchesQueue && !isError && waiting === 0) {
+          } else if (matchesQueue && !unsuccessful && waiting === 0) {
             await send(t("allDone", event.title))
           }
         } catch (error) {
@@ -1230,12 +1516,19 @@ async function main() {
   }
 
   try {
+    await attachCodexAdapter()
+    log("INFO", "Codex app-server adapter connected")
+  } catch (error) {
+    recordError("codex-startup", error)
+    log("WARN", `Codex adapter startup failed; OpenCode remains available: ${error.message}`)
+  }
+  try {
     await configureTelegram(true)
   } catch (error) {
     recordError("telegram-startup", error)
     log("WARN", `Telegram startup connection failed; retrying without exiting: ${error.message}`)
   }
-  await Promise.all([telegramLoop(), eventLoop(), recoveryLoop(), permissionLoop()])
+  await Promise.all([telegramLoop(), eventLoop(), recoveryLoop(), permissionLoop(), codexLoop()])
 }
 
 async function check() {
@@ -1249,7 +1542,9 @@ async function check() {
   const commandNames = new Set((commandResult?.result || []).map((item) => item.command))
   if (!["home", "sessions", "opencode", "codex", "add", "batch"].every((name) => commandNames.has(name))) throw new Error("Telegram command menu is incomplete")
   const sessions = await discoverSessions()
-  console.log(`CHECK=PASS BOT=@${result.result.username} INSTANCES=${loadInstances().length} SESSIONS=${sessions.length} COMMANDS=home,sessions,opencode,codex,add,batch`)
+  const codexSessions = filterAgentSessions(sessions, "codex").length
+  console.log(`CHECK=PASS BOT=@${result.result.username} INSTANCES=${loadInstances().length} SESSIONS=${sessions.length} CODEX_SESSIONS=${codexSessions} COMMANDS=home,sessions,opencode,codex,add,batch`)
+  await codexClient?.stop().catch(() => {})
 }
 
 function selfTest() {
@@ -1262,6 +1557,8 @@ function selfTest() {
   if (parseCommand("/find paper project").arg !== "paper project") throw new Error("parse find failed")
   if (parseCommand("/health").name !== "health") throw new Error("parse health failed")
   if (parseCommand("/approvals").name !== "approvals") throw new Error("parse approvals failed")
+  if (parseCommand("/questions").name !== "questions") throw new Error("parse questions failed")
+  if (parseCommand("/answer continue").arg !== "continue") throw new Error("parse answer failed")
   if (parseCommand("/send 继续运行测试").arg !== "继续运行测试") throw new Error("parse send failed")
   if (parseCommand("/add 先运行测试").name !== "add") throw new Error("parse add failed")
   if (parseCommand("/batch 先运行测试\n---\n再写文档").name !== "batch") throw new Error("parse batch failed")
@@ -1286,7 +1583,7 @@ else {
   ensureDirectories()
   try {
     acquireLock()
-    const cleanup = () => { releaseLock(); process.exit(0) }
+    const cleanup = async () => { await codexClient?.stop().catch(() => {}); releaseLock(); process.exit(0) }
     process.on("SIGINT", cleanup)
     process.on("SIGTERM", cleanup)
     await main()

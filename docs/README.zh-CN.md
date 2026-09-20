@@ -2,25 +2,25 @@
 
 [English](../README.md) · **简体中文** · [架构说明](ARCHITECTURE.md) · [Codex 命令设计](CODEX_COMMANDS.zh-CN.md) · [开发路线](ROADMAP.md) · [安全说明](../SECURITY.md)
 
-Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控制中心。当前版本已经支持 OpenCode Desktop；项目通过独立适配器接入不同智能体，为以后加入 Codex 和其他模型保留清晰边界。
+Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控制中心。当前版本已经通过一个机器人支持 OpenCode Desktop 和 Codex，并隔离各自的会话、队列、事件与审批。
 
-> 当前状态：OpenCode 适配器已经可用；Codex 接入仍在开发路线中，当前版本不会假装已经支持。
+> 当前状态：OpenCode 与 Codex 适配器均已实现。Codex 使用官方本机 `app-server` 的 `stdio` 通信，不开放网络监听端口。
 
 ## 已有能力
 
-- 每个 OpenCode 会话完成或失败时发送 Telegram 通知。
+- OpenCode 会话或受监控的 Codex 轮次完成、失败或中断时发送 Telegram 通知。
 - 一个聚合首页提供 OpenCode 和 Codex 两个入口；选择会话后自动进入对应 Agent 模式。
 - 分页浏览会话，并按标题或项目目录搜索。
 - 立即发送指令，或用 `/add`、`/batch` 为每个会话建立串行队列。
 - 重启后恢复队列，过滤重复事件，避免重复通知和重复执行。
-- OpenCode 等待权限审批时提供“仅允许这次”“本会话持续允许”“拒绝”按钮。
+- 转发 OpenCode 审批，以及由 Hub 发起的 Codex 任务审批和提问；只显示底层 Agent 明确支持的决定。
 - 查看会话进度、最近回复、文件改动、队列和服务健康状态。
 - OpenCode 通信只走本机回环地址，不开放任何入站端口。
 - 安装、管理、Telegram 命令、按钮和通知均支持简体中文与英文。
 
 ## 快速开始
 
-需要 Windows 10/11、OpenCode Desktop、Node.js 20 或更新版本，以及通过 [@BotFather](https://t.me/BotFather) 创建的 Telegram Bot。
+需要 Windows 10/11、Node.js 20 或更新版本、通过 [@BotFather](https://t.me/BotFather) 创建的 Telegram Bot，以及至少一个本机 Agent：OpenCode Desktop 或 Codex Desktop/CLI。
 
 1. 下载或克隆本仓库。
 2. 双击 `Bridge-Manager.cmd`。
@@ -35,7 +35,7 @@ Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控�
 | 命令 | 作用 |
 |---|---|
 | `/home` | 打开聚合首页 |
-| `/opencode`、`/codex` | 进入对应 Agent 模式；Codex 当前会明确提示适配器尚未连接 |
+| `/opencode`、`/codex` | 进入对应 Agent 的会话列表 |
 | `/sessions` 或 `/sessions 2` | 分页浏览所有已连接 Agent 的会话 |
 | `/find 关键词` | 搜索标题和项目目录 |
 | `/use 1` | 选择当前页面中的会话 |
@@ -46,7 +46,8 @@ Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控�
 | `/queue`、`/remove 2` | 查看队列或删除等待项 |
 | `/pause`、`/resume`、`/clearqueue` | 控制自动队列 |
 | `/stop` | 二次确认后停止当前任务 |
-| `/approvals` | 重新显示待处理的 OpenCode 审批 |
+| `/approvals` | 重新显示待处理的 OpenCode 与 Codex 审批 |
+| `/questions`、`/answer 内容` | 查看或回答 Codex 等待中的问题 |
 | `/health`、`/status` | 查看完整或简要健康状态 |
 
 批量示例：
@@ -63,6 +64,8 @@ Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控�
 上一条完成后才会启动下一条。机器人会先发送每条任务的完成消息，队列清空后再发送一次“全部完成”。电脑上手动启动的任务也会通知，但不会误触发无关队列。
 
 主命令菜单保持精简，高级队列、审批和诊断命令仍然可以直接输入。按钮携带操作、Agent 类型和会话身份，切换模式后不需要反复输入会话 ID。
+
+由 Hub 发起的 Codex 任务保持实时 app-server 连接，因此可以在 Telegram 处理审批和提问。若任务从另一个 Codex 客户端发起，Hub 会检测并聚合最终完成通知；运行中的审批仍由发起该任务的客户端处理。
 
 ## 管理
 
@@ -84,9 +87,10 @@ Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控�
 ```powershell
 npm test
 npm run check
+npm run smoke:codex
 ```
 
-适配器边界见[架构说明](ARCHITECTURE.md)，手机端正式命令见[Codex 命令设计](CODEX_COMMANDS.zh-CN.md)，交付阶段见[开发路线](ROADMAP.md)。
+适配器边界见[架构说明](ARCHITECTURE.md)，手机端正式命令见[Codex 交互说明](CODEX_COMMANDS.zh-CN.md)，后续功能见[开发路线](ROADMAP.md)。
 
 ## 许可证
 

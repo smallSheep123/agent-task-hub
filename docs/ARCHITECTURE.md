@@ -24,11 +24,11 @@ Task controller
         ▼
 Agent adapter contract
   ├─ OpenCode adapter  ← implemented
-  ├─ Codex adapter     ← planned
+  ├─ Codex app-server  ← implemented
   └─ future adapters
 ```
 
-The controller currently contains OpenCode-oriented API calls. The Telegram interaction and persistent identities are already backend-aware; later releases will move transport calls behind the common adapter contract without changing the mode, command, button, or queue semantics.
+The controller routes OpenCode through loopback HTTP and Codex through a persistent local JSONL `stdio` process. Telegram interaction and persistent identities are backend-aware, so both adapters share commands and queue semantics without sharing state.
 
 ## Adapter contract
 
@@ -53,7 +53,21 @@ Backend records carry a `backend` identifier. Queue, in-flight work, recovery, d
   └─ Codex entry    ── select task    ── Codex actions
 ```
 
-`/sessions` is the aggregated browser. `/opencode` and `/codex` are direct entrances. Selecting an item enters its backend mode. Common commands such as `/show`, `/send`, `/add`, `/batch`, `/queue`, and `/stop` operate only on the selected session in the active mode. Notifications from every adapter remain aggregated and always show their backend. The Codex entry currently reports that the adapter is unavailable.
+`/sessions` is the aggregated browser. `/opencode` and `/codex` are direct entrances. Selecting an item enters its backend mode. Common commands such as `/show`, `/send`, `/add`, `/batch`, `/queue`, and `/stop` operate only on the selected session in the active mode. Notifications from every adapter remain aggregated and always show their backend.
+
+## Codex flow
+
+```text
+Controller
+  └─ local Codex app-server process (stdio JSONL)
+       ├─ thread/list + thread/read for discovery and inspection
+       ├─ thread/resume + turn/start for prompts and queues
+       ├─ turn/interrupt for stop
+       ├─ turn/completed for terminal notifications
+       └─ server requests for approvals and user input
+```
+
+The adapter prefers the Codex Desktop bundled executable on Windows and falls back to a CLI installation. It never starts a WebSocket listener. A five-second metadata poll detects terminal turns written by another local Codex client; the live event stream handles turns started through the Hub. The first poll establishes a baseline, so historical turns are not reported as new completions. Approval and user-input requests are connection-scoped: the Hub can answer them for turns it starts, while a turn started in another Codex client keeps its live requests in that originating client.
 
 ## Current OpenCode flow
 
@@ -74,7 +88,7 @@ Windows Task Scheduler
   └─ starts the proxy-aware PowerShell launcher at logon
 ```
 
-The adapter never reads the Telegram token. The controller never listens on a TCP port. They exchange registrations and events through an ACL-restricted local directory.
+The OpenCode adapter never reads the Telegram token. The controller never listens on a TCP port. OpenCode registrations use an ACL-restricted local directory, while Codex communication stays inside the controller's child-process pipes.
 
 ## Local data and isolation
 

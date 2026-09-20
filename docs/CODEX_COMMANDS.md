@@ -2,7 +2,7 @@
 
 **English** · [简体中文](CODEX_COMMANDS.zh-CN.md) · [Home](../README.md) · [Roadmap](ROADMAP.md)
 
-> Status: the dual-entry interaction and common session state are implemented. The Codex adapter is not implemented; `/codex` explicitly reports that it is unavailable.
+> Status: the core Codex adapter is implemented over the official local `app-server` `stdio` interface. `/codex` browses, selects, inspects, and controls existing tasks.
 
 ## Final interaction model
 
@@ -25,7 +25,7 @@ The visible command menu contains only routine actions:
 | `/home` | Aggregated home and both agent entrances |
 | `/sessions` | Browse sessions from every connected agent |
 | `/opencode` | Enter the OpenCode session list |
-| `/codex` | Enter Codex tasks; reports unavailable until the adapter exists |
+| `/codex` | Enter the Codex task list |
 | `/current` | Show the current mode and session |
 | `/show` | Show progress, latest output, and changes |
 | `/send prompt` | Send immediately to the selected session |
@@ -34,18 +34,19 @@ The visible command menu contains only routine actions:
 | `/queue` | Show active and waiting work for the selected session |
 | `/help` | Show concise help |
 
-`/find`, `/use`, `/remove`, `/pause`, `/resume`, `/clearqueue`, `/stop`, `/approvals`, `/health`, and `/status` remain accepted without occupying the main menu.
+`/find`, `/use`, `/remove`, `/pause`, `/resume`, `/clearqueue`, `/stop`, `/approvals`, `/questions`, `/answer`, `/health`, and `/status` remain accepted without occupying the main menu.
 
 ## Common actions and Codex extensions
 
 After selecting a Codex task, the Hub reuses `/show`, `/send`, `/add`, `/batch`, `/queue`, and `/stop`. Users do not need a separate `/tasks codex 2` grammar.
 
-Codex-only features arrive later:
+Codex questions are implemented; other backend-specific features arrive later:
 
 | Command | Behavior | App Server mapping |
 |---|---|---|
 | `/steer instruction` | Add input to an active turn | `turn/steer` |
-| `/questions` | Show unanswered Codex questions | `item/tool/requestUserInput` |
+| `/questions` | Show unanswered Codex questions (implemented) | `item/tool/requestUserInput` |
+| `/answer text` | Answer the next free-text question for the selected task (implemented) | `item/tool/requestUserInput` response |
 | `/new project_alias \| prompt` | Create work in an approved project | `thread/start` + `turn/start` |
 | `/review working` | Review uncommitted changes | `review/start: uncommittedChanges` |
 | `/review branch:main` | Review against a base branch | `review/start: baseBranch` |
@@ -54,13 +55,15 @@ The official [`codex app-server` documentation](https://developers.openai.com/do
 
 ## Queues and notifications
 
-Persistent state uses a backend-aware identity. The current implementation separates queues, in-flight items, recovery, and event deduplication with `{backend, serverUrl/instanceId, sessionId}`. Codex terminal events will additionally deduplicate with `{backend, threadId, turnId}`.
+Persistent state uses a backend-aware identity. The current implementation separates queues, in-flight items, recovery, and event deduplication with `{backend, serverUrl/instanceId, sessionId}`. Codex terminal events deduplicate with `{backend, threadId, turnId}`.
 
 `/batch` dispatches the next item only after the previous item reaches a terminal state. Every item is reported before the queue advances, followed by one queue-complete notification. Work started on the computer is reported without advancing an unrelated queue. Restart recovery compares persisted state, current session status, pending events, and recent messages.
 
 ## Approvals and safety
 
-Buttons expose only decisions supported by the underlying agent, such as allow once, allow for session, and reject. The Hub does not invent a permanent allow-all decision. Codex user-input requests should appear as separate notifications with their allowed answers.
+Buttons expose only decisions returned by app-server, such as allow once, allow for session, reject, and cancel. The Hub does not invent a permanent allow-all decision. Codex user-input requests appear as separate notifications with option buttons and `/answer` support.
+
+These live requests are available for Codex turns started through the Hub. A turn started in another Codex client still produces a terminal notification here, while its approval or question remains in the client that owns that app-server connection.
 
 - `/new` accepts only locally registered project aliases.
 - Telegram never exposes a shell or arbitrary PowerShell execution.
@@ -71,6 +74,6 @@ Buttons expose only decisions supported by the underlying agent, such as allow o
 ## Delivery order
 
 1. Done: aggregated home, two entrances, automatic mode selection, backend labels, backend-aware state, and legacy OpenCode state migration.
-2. Next: move existing OpenCode HTTP operations behind a common adapter interface and add reusable contract tests.
-3. Codex phase 1: list, select, inspect, send, stop, notify, approve, answer, and queue.
-4. Codex phase 2: create, steer, review, fork, goal, and archive operations.
+2. Done: Codex list, select, inspect, send, stop, terminal notifications, external-completion polling, approvals, questions, queues, and restart recovery.
+3. Next: move existing OpenCode HTTP operations behind a common adapter interface and expand contract tests.
+4. Later: create, steer, review, fork, goal, and archive operations.

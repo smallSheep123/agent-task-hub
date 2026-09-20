@@ -84,7 +84,7 @@ New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null
 foreach ($name in @('instances','events','logs')) { New-Item -ItemType Directory -Path (Join-Path $DataRoot $name) -Force | Out-Null }
 $protectedToken = ConvertFrom-SecureString (ConvertTo-SecureString $token -AsPlainText -Force)
 $config = [ordered]@{
-    version = 2
+    version = 3
     product = 'agent-task-hub'
     language = $Language
     botUsername = [string]$me.username
@@ -94,6 +94,8 @@ $config = [ordered]@{
     maxSessions = 10
     sessionPageSize = 6
     queueLimit = 20
+    codexPollIntervalMs = 5000
+    codexMonitorLimit = 100
     configuredAt = (Get-Date).ToString('o')
 }
 $maxUpdate = ($updates | Measure-Object -Property update_id -Maximum).Maximum

@@ -2,7 +2,7 @@
 
 [English](CODEX_COMMANDS.md) · **简体中文** · [项目首页](README.zh-CN.md) · [开发路线](ROADMAP.md)
 
-> 状态：双入口与通用会话状态已经实现，Codex 适配器尚未实现。当前 `/codex` 会明确显示“尚未连接”，不会伪装成可用。
+> 状态：Codex 核心适配器已经实现，使用官方 `app-server` 的本机 `stdio` 接口。`/codex` 可浏览、选择、查看和控制现有任务。
 
 ## 最终交互
 
@@ -25,7 +25,7 @@
 | `/home` | 聚合首页和两个 Agent 入口 |
 | `/sessions` | 聚合浏览所有 Agent 会话 |
 | `/opencode` | 直接进入 OpenCode 会话列表 |
-| `/codex` | 直接进入 Codex 任务列表；适配器完成前显示不可用 |
+| `/codex` | 直接进入 Codex 任务列表 |
 | `/current` | 当前模式与会话 |
 | `/show` | 当前会话进度、最近回复和改动 |
 | `/send 内容` | 立即发送给当前会话 |
@@ -34,18 +34,19 @@
 | `/queue` | 查看当前会话的运行项与等待项 |
 | `/help` | 显示简明帮助 |
 
-`/find`、`/use`、`/remove`、`/pause`、`/resume`、`/clearqueue`、`/stop`、`/approvals`、`/health` 和 `/status` 继续可用，只是不占主菜单。
+`/find`、`/use`、`/remove`、`/pause`、`/resume`、`/clearqueue`、`/stop`、`/approvals`、`/questions`、`/answer`、`/health` 和 `/status` 继续可用，只是不占主菜单。
 
 ## 统一操作与 Codex 扩展
 
 选择 Codex 任务后，优先复用 `/show`、`/send`、`/add`、`/batch`、`/queue` 和 `/stop`，不再要求用户学习 `/tasks codex 2` 这类额外语法。
 
-Codex 独有能力放在第二阶段：
+Codex 提问已经实现；其他独有能力放在后续阶段：
 
 | 命令 | 作用 | App Server 映射 |
 |---|---|---|
 | `/steer 内容` | 给正在运行的轮次补充要求 | `turn/steer` |
-| `/questions` | 重新显示等待回答的问题 | `item/tool/requestUserInput` |
+| `/questions` | 重新显示等待回答的问题（已实现） | `item/tool/requestUserInput` |
+| `/answer 内容` | 回答当前任务下一条自由文本问题（已实现） | `item/tool/requestUserInput` response |
 | `/new 项目别名 \| 指令` | 在预先登记的项目中建立新任务 | `thread/start` + `turn/start` |
 | `/review working` | 审查未提交改动 | `review/start: uncommittedChanges` |
 | `/review branch:main` | 与指定基础分支比较 | `review/start: baseBranch` |
@@ -54,13 +55,15 @@ Codex 独有能力放在第二阶段：
 
 ## 队列与通知
 
-所有持久状态都使用带 Agent 身份的键。当前实现以 `{backend, serverUrl/instanceId, sessionId}` 隔离队列、运行中任务、恢复状态和事件去重；Codex 接入后完成事件进一步使用 `{backend, threadId, turnId}` 去重。
+所有持久状态都使用带 Agent 身份的键。当前实现以 `{backend, serverUrl/instanceId, sessionId}` 隔离队列、运行中任务、恢复状态和事件去重；Codex 完成事件使用 `{backend, threadId, turnId}` 去重。
 
 `/batch` 只在上一条收到终态后发送下一条。每条完成先通知，再推进队列；最后发送“全部完成”。电脑端手动启动的任务会通知，但不会推进不相关队列。重启后会根据保存状态、会话状态、事件和最近消息决定继续等待、恢复完成或重新入队。
 
 ## 审批与安全
 
-审批按钮只显示底层 Agent 明确提供的决定，例如“仅允许这次”“本会话持续允许”和“拒绝”，不创造“全部永久放行”。Codex 提问也应作为单独通知显示可选答案。
+审批按钮只显示 app-server 明确提供的决定，例如“仅允许这次”“本会话持续允许”“拒绝”和“取消任务”，不创造“全部永久放行”。Codex 提问会作为单独通知显示选项，也可以用 `/answer` 回复自由文本。
+
+这些实时请求适用于由 Hub 发起的 Codex 任务。若任务从另一个 Codex 客户端发起，Hub 仍会发送最终完成通知，但审批或提问会留在持有该 app-server 连接的原客户端中。
 
 - `/new` 只接受本机配置中登记的项目别名。
 - 不提供 Telegram `/shell` 或任意 PowerShell 命令。
@@ -71,6 +74,6 @@ Codex 独有能力放在第二阶段：
 ## 实现顺序
 
 1. 已完成：聚合首页、双入口、模式切换、后端标签、状态隔离、兼容旧 OpenCode 状态。
-2. 下一步：把现有 OpenCode HTTP 操作收进统一适配器接口，并增加契约测试。
-3. Codex 第一阶段：任务列表、选择、查看、发送、停止、完成提醒、审批、提问和队列。
-4. Codex 第二阶段：新建任务、运行中补充、审查、派生、目标和归档。
+2. 已完成：Codex 任务列表、选择、查看、发送、停止、完成提醒、外部任务完成轮询、审批、提问、队列和断电恢复。
+3. 下一步：把现有 OpenCode HTTP 操作收进统一适配器接口，并增加更多契约测试。
+4. 后续：新建任务、运行中补充、审查、派生、目标和归档。
