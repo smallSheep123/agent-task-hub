@@ -62,6 +62,27 @@ assert.equal(markdownCodeLanguage("../../bad"), "")
 const unclosedFence = telegramMarkdown("Title\n\n最近回复：\n```python\nprint('ok')")
 assert.ok(unclosedFence.endsWith("\n```"))
 
+const tableReply = telegramMarkdown(`✅ [Codex] 任务已完成
+
+最近回复：
+最简单的定位：
+
+| 组件 | 用途 |
+|---|---|
+| HAProxy TCP 2443 | 接收 Clash 公网连接 |
+| Tailscale | 私密传输阿里云到首尔的数据 |
+| Peer Relay | 必要时提供第三台中继 |
+
+结束。`)
+assert.ok(!tableReply.includes("|\\-\\-\\-|"))
+assert.ok(tableReply.includes(">• *组件：* HAProxy TCP 2443"))
+assert.ok(tableReply.includes(">  ↳ *用途：* 接收 Clash 公网连接"))
+assert.ok(tableReply.includes(">• *组件：* Tailscale"))
+assert.ok(tableReply.includes(">结束。"))
+
+const tableInsideCode = telegramMarkdown("Title\n\n最近回复：\n```text\n| a | b |\n|---|---|\n| 1 | 2 |\n```")
+assert.ok(tableInsideCode.includes("| a | b |\n|---|---|\n| 1 | 2 |"))
+
 const help = telegramMarkdown("Agent Task Hub\n\n/add 内容 — 追加队列")
 assert.match(help, /`\/add 内容` — 追加队列/)
 

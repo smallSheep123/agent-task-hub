@@ -94,6 +94,85 @@ export function markdownPreLine(value) {
   return String(value ?? "").replace(/\\/g, "\\\\").replace(/`/g, "\\`")
 }
 
+function markdownTableCells(value) {
+  let input = String(value ?? "").trim()
+  if (!input.includes("|")) return null
+  if (input.startsWith("|")) input = input.slice(1)
+  if (input.endsWith("|")) input = input.slice(0, -1)
+  const cells = []
+  let cell = ""
+  let escaped = false
+  let inCode = false
+  for (const character of input) {
+    if (escaped) {
+      cell += character
+      escaped = false
+    } else if (character === "\\") {
+      escaped = true
+      cell += character
+    } else if (character === "`") {
+      inCode = !inCode
+      cell += character
+    } else if (character === "|" && !inCode) {
+      cells.push(cell.trim())
+      cell = ""
+    } else {
+      cell += character
+    }
+  }
+  if (escaped) cell += "\\"
+  cells.push(cell.trim())
+  return cells.length >= 2 ? cells : null
+}
+
+function markdownTableAt(lines, index) {
+  const headers = markdownTableCells(lines[index])
+  const dividers = markdownTableCells(lines[index + 1])
+  if (!headers || !dividers || headers.length !== dividers.length) return null
+  if (!dividers.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, "")))) return null
+  const rows = []
+  let end = index + 1
+  for (let cursor = index + 2; cursor < lines.length; cursor += 1) {
+    const cells = markdownTableCells(lines[cursor])
+    if (!cells || cells.length !== headers.length) break
+    rows.push(cells)
+    end = cursor
+  }
+  return rows.length ? { headers, rows, end } : null
+}
+
+function tableHeader(value, index) {
+  return String(value ?? "").replace(/[\\*_`\[\]()]/g, "").trim() || `#${index + 1}`
+}
+
+function expandReplyTables(lines) {
+  const expanded = []
+  let richReply = false
+  let fencedCode = false
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    const trimmed = line.trim()
+    if (QUOTE_TO_END_HEADINGS.has(trimmed)) richReply = true
+    if (richReply && /^```/.test(trimmed)) fencedCode = !fencedCode
+    if (richReply && !fencedCode) {
+      const table = markdownTableAt(lines, index)
+      if (table) {
+        table.rows.forEach((row, rowIndex) => {
+          row.forEach((cell, cellIndex) => {
+            const prefix = cellIndex === 0 ? "-" : "  ↳"
+            expanded.push(`${prefix} **${tableHeader(table.headers[cellIndex], cellIndex)}：** ${cell}`)
+          })
+          if (rowIndex < table.rows.length - 1) expanded.push("")
+        })
+        index = table.end
+        continue
+      }
+    }
+    expanded.push(line)
+  }
+  return expanded
+}
+
 function labelLine(line) {
   const match = String(line).match(/^\s*([^：:\r\n]{2,32})([：:])(?:\s*)(.*)$/u)
   if (!match) return null
@@ -103,7 +182,7 @@ function labelLine(line) {
 }
 
 function renderMarkdown(value) {
-  const lines = String(value ?? "").replace(/\r\n?/g, "\n").trim().split("\n")
+  const lines = expandReplyTables(String(value ?? "").replace(/\r\n?/g, "\n").trim().split("\n"))
   const firstContent = lines.findIndex((line) => line.trim())
   let quoteToEnd = false
   let quoteSection = false
