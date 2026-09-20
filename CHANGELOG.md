@@ -21,12 +21,13 @@ All notable changes to this project are documented here.
 
 - Reduced the visible Telegram command menu to the common daily operations; advanced commands remain available by direct input.
 - Activated the Codex entry when app-server is available and retained a clear connection error when it is not.
-- Updated the package version to 0.2.2.
+- Updated the package version to 0.2.3.
 - Made OpenCode instance refresh tolerant of concurrent Windows file replacement and normalized both idle event forms so terminal notifications are still delivered.
 - Added controller-side OpenCode terminal polling as a fallback for API-started sessions that do not reach the plugin event hook.
 - Grouped OpenCode discovery by local server: ports run in parallel while directories on one server stay sequential, avoiding stale-port delays and local API overload.
 - Fixed terminal-event identity mapping to prefer `sessionId` over the event ID, restoring queue correlation and per-session deduplication.
 - Fixed completion-button callbacks to target `sessionId` instead of the longer event ID, preventing Codex notifications from exceeding Telegram's 64-byte callback limit.
+- Suppressed transient externally-polled Codex `interrupted` states without `completedAt` and only report the latest turn, so a new question cannot turn an in-progress Desktop reply into a false interruption notification.
 
 ## 0.1.0 - 2026-09-20
 

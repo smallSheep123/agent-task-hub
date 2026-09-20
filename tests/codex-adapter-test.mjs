@@ -3,6 +3,7 @@ import {
   approvalOptionsForRequest,
   approvalResponseForRequest,
   codexThreadToSession,
+  externalTerminalTurn,
   terminalEventFromNotification,
 } from "../adapters/codex-app-server.mjs"
 
@@ -39,6 +40,23 @@ const interrupted = terminalEventFromNotification({
   turn: { id: "turn_2", status: "interrupted", items: [] },
 })
 assert.equal(interrupted.type, "session.interrupted")
+
+const persistedWhileRunning = {
+  turns: [
+    { id: "turn_old", status: "completed", completedAt: 1700000000 },
+    { id: "turn_current", status: "interrupted", startedAt: 1700000100, completedAt: null },
+  ],
+}
+assert.equal(externalTerminalTurn(persistedWhileRunning), null)
+assert.equal(externalTerminalTurn({
+  turns: [
+    { id: "turn_old", status: "completed", completedAt: 1700000000 },
+    { id: "turn_current", status: "inProgress", startedAt: 1700000100 },
+  ],
+}), null)
+const finalExternalTurn = { id: "turn_current", status: "completed", completedAt: 1700000120 }
+assert.equal(externalTerminalTurn({ turns: [finalExternalTurn] }), finalExternalTurn)
+assert.equal(externalTerminalTurn({ turns: [finalExternalTurn] }, { observedTurns: new Set(["turn_current"]) }), null)
 
 assert.deepEqual(
   approvalOptionsForRequest("item/commandExecution/requestApproval", { availableDecisions: ["accept", "decline"] }).map((item) => item.action),

@@ -78,6 +78,19 @@ function unixMilliseconds(value) {
   return number
 }
 
+export function externalTerminalTurn(thread, { threshold = 0, observedTurns = new Set() } = {}) {
+  const turns = Array.isArray(thread?.turns) ? thread.turns : []
+  const turn = turns.at(-1)
+  if (!turn || !["completed", "failed", "interrupted"].includes(turn.status)) return null
+  // A Desktop-owned turn can be persisted temporarily as "interrupted" while
+  // it is still running. Only completedAt proves that a polled external turn
+  // reached a terminal state. Older terminal turns must not be reported after
+  // a newer turn starts in the same thread.
+  const completedAt = unixMilliseconds(turn.completedAt)
+  if (!completedAt || completedAt < threshold || observedTurns.has(String(turn.id))) return null
+  return turn
+}
+
 function titleForThread(thread) {
   return String(thread?.name || thread?.preview || "Codex task").split(/\r?\n/, 1)[0].trim().slice(0, 180) || "Codex task"
 }
@@ -230,7 +243,7 @@ export class CodexAppServer extends EventEmitter {
     this.lines = readline.createInterface({ input: this.process.stdout })
     this.lines.on("line", (line) => this.#receive(line))
     this.serverInfo = await this.request("initialize", {
-      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.2.2" },
+      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.2.3" },
       capabilities: { experimentalApi: true },
     })
     this.notify("initialized", {})
@@ -379,10 +392,7 @@ export class CodexAppServer extends EventEmitter {
         if (previous !== undefined && version <= previous) continue
         const thread = await this.readThread(threadId)
         const threshold = previous === undefined ? this.monitorStartedAt : previous - 2000
-        const turn = [...(thread?.turns || [])].reverse().find((candidate) =>
-          ["completed", "failed", "interrupted"].includes(candidate?.status)
-          && !this.observedTurns.has(String(candidate.id))
-          && unixMilliseconds(candidate.completedAt || candidate.startedAt) >= threshold)
+        const turn = externalTerminalTurn(thread, { threshold, observedTurns: this.observedTurns })
         if (!turn) continue
         this.observedTurns.add(String(turn.id))
         this.emit("terminal", terminalEventFromNotification({ threadId, turn }, thread))
