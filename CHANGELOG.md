@@ -21,6 +21,7 @@ All notable changes to this project are documented here.
 - Added a live aggregated-home dashboard with per-agent running conversations, elapsed time, project paths, waiting queue counts, request blockers, refresh, and direct active-session buttons.
 - Detect Codex Desktop-owned work whose separate app-server view reports `notLoaded` while the latest persisted turn has `startedAt` but no `completedAt`; probe only recent and preferred tasks to keep the dashboard responsive.
 - Added safe Telegram MarkdownV2 rendering for dashboard, session, queue, approval, question, help, and completion messages, including bold headings, inline status/path values, quoted assistant replies, and automatic escaping of dynamic content.
+- Redesigned session pages with clear number badges and separate metadata, title, and directory rows; restricted field styling to known labels so colons inside titles and Windows paths cannot cause accidental bold text.
 
 ### Changed
 

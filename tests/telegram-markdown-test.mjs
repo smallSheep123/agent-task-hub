@@ -30,6 +30,15 @@ assert.ok(details.includes("*最近回复：*\n>Fixed \\_all\\_ \\[items\\]\\.")
 const help = telegramMarkdown("Agent Task Hub\n\n/add 内容 — 追加队列")
 assert.match(help, /`\/add 内容` — 追加队列/)
 
+const sessionTitleWithColon = telegramMarkdown(`全部 Agent 会话（27 个，第 1/5 页）：
+
+4️⃣ Codex · idle
+📝「/D:\\AIGC/proxy/NEW_NODE.md 网速已测试」
+📁 D:\\AIGC\\proxy`)
+assert.ok(!sessionTitleWithColon.includes("*📝「/D:*"))
+assert.ok(sessionTitleWithColon.includes("4️⃣ Codex · idle"))
+assert.ok(sessionTitleWithColon.includes("📝「/D:\\\\AIGC/proxy/NEW\\_NODE\\.md 网速已测试」"))
+
 const bounded = telegramMarkdown("Title\n" + "_[x]. ".repeat(2000))
 assert.ok(bounded.length <= 4000)
 assert.equal(telegramMarkdownBody("Title").parse_mode, "MarkdownV2")

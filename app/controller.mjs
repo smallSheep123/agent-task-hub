@@ -1357,9 +1357,10 @@ async function main(options = {}) {
     state.sessionBrowser = { mode: needle ? "find" : "sessions", query: String(query || "").trim(), page: currentPage, backend }
     saveState()
     if (!filtered.length) return send(needle ? t("noSearch", compact(query, 80)) : t("noSessions"), { reply_markup: { inline_keyboard: [[{ text: t("buttonHome"), callback_data: "home" }]] } })
+    const numberBadges = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"]
     const lines = sessions.map((item, index) => {
       const selectedMark = state.selected?.id === item.id && (state.selected?.backend || "opencode") === (item.backend || "opencode") ? "✅ " : ""
-      return `${index + 1}. ${selectedMark}[${backendText(item.backend)} · ${item.status}] ${item.title}\n   ${item.directory}`
+      return `${numberBadges[index] || `${index + 1}.`} ${selectedMark}${backendText(item.backend)} · ${item.status}\n📝「${item.title}」\n📁 ${item.directory}`
     })
     const keyboard = sessions.map((item, index) => [{
       text: `${state.selected?.id === item.id && (state.selected?.backend || "opencode") === (item.backend || "opencode") ? "✅ " : ""}${index + 1}. ${backendText(item.backend)} · ${item.title}`.slice(0, 52),
@@ -1373,7 +1374,7 @@ async function main(options = {}) {
     keyboard.push(nav)
     keyboard.push([{ text: t("buttonOpenCode"), callback_data: "agent:opencode" }, { text: t("buttonCodex"), callback_data: "agent:codex" }, { text: t("buttonHome"), callback_data: "home" }])
     const heading = needle ? t("searchHeading", compact(query, 80)) : backend === "opencode" ? t("openCodeSessionsHeading") : backend === "codex" ? t("codexSessionsHeading") : t("sessionsHeading")
-    await send(t("page", heading, filtered.length, currentPage, pageCount, lines.join("\n")), { reply_markup: { inline_keyboard: keyboard } })
+    await send(t("page", heading, filtered.length, currentPage, pageCount, lines.join("\n\n")), { reply_markup: { inline_keyboard: keyboard } })
   }
 
   async function resolveSelected() {

@@ -5,6 +5,17 @@ const CODE_VALUE_LABELS = new Set([
   "状态", "目录", "轮次", "类型", "进度", "权限",
 ])
 
+const FIELD_LABELS = new Set([
+  ...CODE_VALUE_LABELS,
+  "Session", "Permission", "Task", "Reason", "Pending todos", "Language", "Telegram",
+  "OpenCode Desktop", "Codex adapter", "Plugin instances", "Available sessions", "Selected session",
+  "Pending requests", "Queue", "Uptime", "Latest error", "Current entry", "Selected", "Source",
+  "Duration", "Remaining", "Next", "Changes", "Error", "Elapsed", "Waiting", "Queue mode", "Active item",
+  "会话", "任务", "原因", "待办", "界面语言", "OpenCode Desktop", "Codex 适配器", "插件实例",
+  "可用会话", "当前会话", "待处理请求", "队列", "本次运行", "最近错误", "当前入口", "当前选择",
+  "来源", "耗时", "剩余", "下一条", "改动", "错误", "已运行", "等待数量", "队列状态", "当前队列任务",
+])
+
 const QUOTE_TO_END_HEADINGS = new Set(["最近回复：", "Latest reply:"])
 const QUOTE_SECTION_HEADINGS = new Set(["详情：", "Details:", "目标：", "Targets:", "错误：", "Error:"])
 
@@ -28,7 +39,7 @@ function labelLine(line) {
   const match = String(line).match(/^\s*([^：:\r\n]{2,32})([：:])(?:\s*)(.*)$/u)
   if (!match) return null
   const label = match[1].trim()
-  if (/^https?$/i.test(label) || /^[A-Za-z]$/.test(label)) return null
+  if (!FIELD_LABELS.has(label)) return null
   return { label, value: match[3] }
 }
 
