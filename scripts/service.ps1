@@ -63,9 +63,10 @@ function Show-Status {
 switch ($Action) {
     'install' {
         if (-not (Test-Path -LiteralPath $ConfigPath)) { throw (Get-AgentHubText 'TelegramNotInitialized') }
+        if (Get-BridgeTask) { Stop-BridgeTask }
         $node = (Get-Command node.exe -ErrorAction Stop).Source
         $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
-        $runnerArgs = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Runner`" -Mode run -ControllerPath `"$Controller`" -NodePath `"$node`""
+        $runnerArgs = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Runner`" -Mode run -ControllerPath `"$Controller`" -NodePath `"$node`""
         $taskAction = New-ScheduledTaskAction -Execute $powershell -Argument $runnerArgs -WorkingDirectory $Root
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
         $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
