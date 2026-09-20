@@ -87,6 +87,8 @@ Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控�
 ```powershell
 npm test
 npm run check
+npm run stress
+npm run stress:codex
 npm run smoke:codex
 ```
 

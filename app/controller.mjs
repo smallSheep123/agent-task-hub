@@ -245,6 +245,12 @@ function eventFingerprint(event) {
   })).digest("hex").slice(0, 24)
 }
 
+export function clearRecoveredError(state, ...scopes) {
+  if (!state?.lastError || !scopes.includes(state.lastError.scope)) return false
+  state.lastError = null
+  return true
+}
+
 async function requestJson(url, options = {}, timeoutMs = 12000) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -1385,6 +1391,7 @@ async function main() {
         const updates = await telegram("getUpdates", { offset: Number(state.updateOffset || 0), timeout: 30, allowed_updates: ["message", "callback_query"] })
         if (telegramFailureCount > 0) log("INFO", `Telegram connection restored after ${telegramFailureCount} failure(s)`)
         telegramFailureCount = 0
+        if (clearRecoveredError(state, "telegram-polling", "telegram-startup")) saveState()
         for (const update of updates || []) {
           try { await processUpdate(update) } catch (error) { recordError("telegram-command", error); log("ERROR", `Telegram update failed: ${error.stack || error.message}`); await send(t("operationFailed", compact(error.message, 500))).catch(() => {}) }
           state.updateOffset = Number(update.update_id) + 1
@@ -1665,6 +1672,10 @@ function selfTest() {
   if (parseBatch("先运行测试\n---\n再写文档").length !== 2) throw new Error("split batch failed")
   if (eventFingerprint({ type: "session.idle", sessionId: "s", excerpt: "ok" }) !== eventFingerprint({ id: "other", type: "session.idle", sessionId: "s", excerpt: "ok" })) throw new Error("event fingerprint unstable")
   if (eventFingerprint({ type: "session.idle", sessionId: "s", excerpt: "ok" }) === eventFingerprint({ type: "session.idle", sessionId: "s", excerpt: "different" })) throw new Error("event fingerprint collision")
+  const recoveredState = { lastError: { scope: "telegram-polling", message: "temporary" } }
+  if (!clearRecoveredError(recoveredState, "telegram-polling") || recoveredState.lastError !== null) throw new Error("recovered error was not cleared")
+  const unrelatedState = { lastError: { scope: "notification", message: "keep" } }
+  if (clearRecoveredError(unrelatedState, "telegram-polling") || unrelatedState.lastError?.scope !== "notification") throw new Error("unrelated error was cleared")
   const polled = openCodeTerminalEvent({ id: "s", title: "Test", directory: "C:\\work", serverUrl: "http://127.0.0.1:4096", updated: 1700000000000 }, [
     { info: { id: "m", role: "assistant", time: { completed: 1700000000000 } }, parts: [{ type: "text", text: "done" }] },
   ])

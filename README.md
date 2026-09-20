@@ -89,6 +89,8 @@ The runtime has no npm dependencies.
 ```powershell
 npm test
 npm run check
+npm run stress
+npm run stress:codex
 npm run smoke:codex
 ```
 
