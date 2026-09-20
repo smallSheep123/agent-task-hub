@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/smallSheep123/agent-task-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/smallSheep123/agent-task-hub/actions/workflows/ci.yml)
 
-**English** · [简体中文](docs/README.zh-CN.md) · [Architecture](docs/ARCHITECTURE.md) · [Roadmap](docs/ROADMAP.md) · [Security](SECURITY.md)
+**English** · [简体中文](docs/README.zh-CN.md) · [Architecture](docs/ARCHITECTURE.md) · [Codex commands](docs/CODEX_COMMANDS.md) · [Roadmap](docs/ROADMAP.md) · [Security](SECURITY.md)
 
 Agent Task Hub is a Windows-first, multilingual Telegram control center for local coding agents. The current release supports OpenCode Desktop. Its adapter boundary is designed for Codex and other agents without mixing their sessions, events, or permissions into OpenCode-specific code.
 
@@ -83,7 +83,7 @@ npm test
 npm run check
 ```
 
-See [Architecture](docs/ARCHITECTURE.md) for adapter boundaries and [Roadmap](docs/ROADMAP.md) for the Codex integration plan.
+See [Architecture](docs/ARCHITECTURE.md) for adapter boundaries, [Codex commands](docs/CODEX_COMMANDS.md) for the planned Telegram interface, and [Roadmap](docs/ROADMAP.md) for delivery phases.
 
 ## License
 

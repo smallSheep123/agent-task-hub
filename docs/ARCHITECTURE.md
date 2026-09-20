@@ -1,6 +1,6 @@
 # Architecture
 
-[English](../README.md) · [简体中文](README.zh-CN.md) · [Roadmap](ROADMAP.md)
+[English](../README.md) · [简体中文](README.zh-CN.md) · [Codex commands](CODEX_COMMANDS.md) · [Codex 命令设计](CODEX_COMMANDS.zh-CN.md) · [Roadmap](ROADMAP.md)
 
 ## Product boundary
 

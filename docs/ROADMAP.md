@@ -2,6 +2,8 @@
 
 This document distinguishes released behavior from planned work. 本文明确区分已经发布的能力和后续计划。
 
+The planned Telegram command contract is documented in [Codex command design](CODEX_COMMANDS.md) and [Codex 命令设计](CODEX_COMMANDS.zh-CN.md).
+
 ## Available now / 当前可用
 
 - Bilingual Windows setup and management. / Windows 安装与管理支持中英文。

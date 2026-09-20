@@ -1,6 +1,6 @@
 # Agent Task Hub
 
-[English](../README.md) · **简体中文** · [架构说明](ARCHITECTURE.md) · [开发路线](ROADMAP.md) · [安全说明](../SECURITY.md)
+[English](../README.md) · **简体中文** · [架构说明](ARCHITECTURE.md) · [Codex 命令设计](CODEX_COMMANDS.zh-CN.md) · [开发路线](ROADMAP.md) · [安全说明](../SECURITY.md)
 
 Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控制中心。当前版本已经支持 OpenCode Desktop；项目通过独立适配器接入不同智能体，为以后加入 Codex 和其他模型保留清晰边界。
 
@@ -81,7 +81,7 @@ npm test
 npm run check
 ```
 
-适配器边界见[架构说明](ARCHITECTURE.md)，Codex 接入安排见[开发路线](ROADMAP.md)。
+适配器边界见[架构说明](ARCHITECTURE.md)，手机端正式命令见[Codex 命令设计](CODEX_COMMANDS.zh-CN.md)，交付阶段见[开发路线](ROADMAP.md)。
 
 ## 许可证
 
