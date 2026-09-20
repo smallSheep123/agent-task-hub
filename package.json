@@ -1,0 +1,29 @@
+{
+  "name": "agent-task-hub",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multilingual local Telegram task hub for OpenCode and future coding-agent adapters.",
+  "type": "module",
+  "scripts": {
+    "test": "node app/controller.mjs --self-test && node tests/i18n-test.mjs && node tests/plugin-test.mjs && powershell -NoProfile -ExecutionPolicy Bypass -File tests/parse-powershell.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File tests/localization-test.ps1",
+    "check": "node --check app/controller.mjs && node --check app/locales.mjs && node --check adapters/opencode.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/smallSheep123/agent-task-hub.git"
+  },
+  "keywords": [
+    "opencode",
+    "codex",
+    "coding-agent",
+    "i18n",
+    "telegram",
+    "windows",
+    "automation",
+    "notifications"
+  ],
+  "license": "MIT"
+}

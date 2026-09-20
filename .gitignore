@@ -1,0 +1,23 @@
+# Runtime secrets and state
+config.json
+state.json
+controller.lock
+instances/
+events/
+logs/
+*.key
+*.secret
+.env
+.env.*
+
+# Node and test output
+node_modules/
+coverage/
+*.log
+
+# Editors and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
