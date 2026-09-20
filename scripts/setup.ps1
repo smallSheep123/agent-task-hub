@@ -94,6 +94,7 @@ $config = [ordered]@{
     maxSessions = 10
     sessionPageSize = 6
     queueLimit = 20
+    openCodePollIntervalMs = 5000
     codexPollIntervalMs = 5000
     codexMonitorLimit = 100
     configuredAt = (Get-Date).ToString('o')

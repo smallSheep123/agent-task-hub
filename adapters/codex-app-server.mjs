@@ -230,7 +230,7 @@ export class CodexAppServer extends EventEmitter {
     this.lines = readline.createInterface({ input: this.process.stdout })
     this.lines.on("line", (line) => this.#receive(line))
     this.serverInfo = await this.request("initialize", {
-      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.2.0" },
+      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.2.1" },
       capabilities: { experimentalApi: true },
     })
     this.notify("initialized", {})

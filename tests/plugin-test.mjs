@@ -18,7 +18,10 @@ const client = {
 }
 
 const hooks = await TelegramBridgePlugin({ client, directory: "D:/work/test", serverUrl: new URL("http://127.0.0.1:4096") })
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_test" } } })
+await Promise.all([
+  hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_test" } } }),
+  hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_test", status: { type: "idle" } } } }),
+])
 const instances = await readdir(join(root, "instances"))
 const events = await readdir(join(root, "events"))
 assert.equal(instances.length, 1)
@@ -30,7 +33,7 @@ assert.equal(instance.adapterVersion, 1)
 assert.equal(instance.auth.kind, "windows-dpapi-basic")
 assert.ok(instance.auth.passwordProtected)
 assert.doesNotMatch(instanceText, /temporary-local-password/)
-assert.equal(events.length, 1)
+assert.equal(events.length, 2)
 const event = JSON.parse(await readFile(join(root, "events", events[0]), "utf8"))
 assert.equal(event.sessionId, "ses_test")
 assert.equal(event.backend, "opencode")

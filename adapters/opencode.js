@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto"
 import { spawnSync } from "node:child_process"
-import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises"
+import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -12,7 +12,21 @@ const configPath = join(dataRoot, "config.json")
 async function atomicJson(path, value) {
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`
   await writeFile(temp, JSON.stringify(value, null, 2), { encoding: "utf8", mode: 0o600 })
-  await rename(temp, path)
+  try {
+    await rename(temp, path)
+  } catch (error) {
+    if (!["EEXIST", "EPERM", "ENOTEMPTY"].includes(error?.code)) {
+      await rm(temp, { force: true }).catch(() => {})
+      throw error
+    }
+    await rm(path, { force: true }).catch(() => {})
+    try {
+      await rename(temp, path)
+    } catch (retryError) {
+      await rm(temp, { force: true }).catch(() => {})
+      throw retryError
+    }
+  }
 }
 
 function loopbackServer(value) {
@@ -109,8 +123,14 @@ export const TelegramBridgePlugin = async ({ client, directory, serverUrl }) => 
 
   return {
     event: async ({ event }) => {
-      if (!["session.idle", "session.error"].includes(event?.type)) return
-      await touchInstance()
+      const idle = event?.type === "session.idle"
+        || (event?.type === "session.status" && event?.properties?.status?.type === "idle")
+      const failed = event?.type === "session.error"
+      if (!idle && !failed) return
+      // Multiple OpenCode windows can emit terminal events at the same time.
+      // A best-effort registry refresh must never prevent the unique event file
+      // from being written when Windows briefly locks the shared instance file.
+      await touchInstance().catch(() => {})
       if (!(await configured())) return
 
       const sessionId = event.properties?.sessionID
@@ -130,7 +150,7 @@ export const TelegramBridgePlugin = async ({ client, directory, serverUrl }) => 
         version: 1,
         backend: "opencode",
         id: randomUUID(),
-        type: event.type,
+        type: failed ? "session.error" : "session.idle",
         createdAt: new Date().toISOString(),
         sessionId: sessionId || null,
         title: session?.title || "OpenCode session",
@@ -138,7 +158,7 @@ export const TelegramBridgePlugin = async ({ client, directory, serverUrl }) => 
         serverUrl: localServer,
         summary: session?.summary || null,
         excerpt,
-        error: event.type === "session.error" ? String(event.properties?.error?.data?.message || event.properties?.error?.name || "Unknown error").slice(0, 1000) : null,
+        error: failed ? String(event.properties?.error?.data?.message || event.properties?.error?.name || "Unknown error").slice(0, 1000) : null,
       }
       await atomicJson(join(eventsDir, `${Date.now()}-${payload.id}.json`), payload)
     },

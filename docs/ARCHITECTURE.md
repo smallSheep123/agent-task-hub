@@ -90,6 +90,8 @@ Windows Task Scheduler
 
 The OpenCode adapter never reads the Telegram token. The controller never listens on a TCP port. OpenCode registrations use an ACL-restricted local directory, while Codex communication stays inside the controller's child-process pipes.
 
+OpenCode terminal events normally arrive through the plugin. The controller also polls session metadata and status every five seconds, establishing a startup baseline before emitting anything. This catches short API-started tasks and Desktop versions that omit the plugin terminal callback; the shared event fingerprinting prevents duplicate Telegram notifications.
+
 ## Local data and isolation
 
 Runtime data is stored under:

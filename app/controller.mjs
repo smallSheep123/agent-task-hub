@@ -297,16 +297,27 @@ function loadInstances() {
 
 async function discoverOpenCodeSessions() {
   const combined = new Map()
+  const groups = new Map()
   for (const instance of loadInstances()) {
-    try {
+    const base = loopbackBase(instance.serverUrl)
+    if (!groups.has(base)) groups.set(base, [])
+    groups.get(base).push(instance)
+  }
+  const results = await Promise.allSettled([...groups.entries()].map(async ([base, instances]) => {
+    const found = []
+    for (const instance of instances) {
       const query = new URLSearchParams({ directory: instance.directory || "" })
-      const base = loopbackBase(instance.serverUrl)
-      const [sessions, statuses] = await Promise.all([
-        requestJson(`${base}/session?${query}`, { headers: openCodeHeaders(instance) }),
-        requestJson(`${base}/session/status?${query}`, { headers: openCodeHeaders(instance) }).catch(() => ({})),
-      ])
-      for (const info of Array.isArray(sessions) ? sessions : []) {
-        const item = {
+      let sessions
+      let statuses
+      try {
+        [sessions, statuses] = await Promise.all([
+          requestJson(`${base}/session?${query}`, { headers: openCodeHeaders(instance) }, 5000),
+          requestJson(`${base}/session/status?${query}`, { headers: openCodeHeaders(instance) }, 5000).catch(() => ({})),
+        ])
+      } catch (error) {
+        throw new Error(`${base}: ${error.message}`)
+      }
+      found.push(...(Array.isArray(sessions) ? sessions : []).map((info) => ({
           id: info.id,
           backend: "opencode",
           instanceId: instance.instanceId || null,
@@ -317,12 +328,18 @@ async function discoverOpenCodeSessions() {
           status: statuses?.[info.id]?.type || "idle",
           summary: info.summary || null,
           auth: instance.auth || null,
-        }
-        const previous = combined.get(item.id)
-        if (!previous || item.updated > previous.updated) combined.set(item.id, item)
-      }
-    } catch (error) {
-      log("WARN", `OpenCode instance unavailable ${instance.serverUrl}: ${error.message}`)
+        })))
+    }
+    return found
+    }))
+  for (const result of results) {
+    if (result.status === "rejected") {
+      log("WARN", `OpenCode instance unavailable: ${result.reason?.message || result.reason}`)
+      continue
+    }
+    for (const item of result.value) {
+      const previous = combined.get(item.id)
+      if (!previous || item.updated > previous.updated) combined.set(item.id, item)
     }
   }
   return [...combined.values()].sort((a, b) => b.updated - a.updated)
@@ -353,6 +370,57 @@ function latestAssistant(messages) {
     if (value) return value
   }
   return t("noAssistantReply")
+}
+
+function openCodeTimestamp(message) {
+  let value = Number(message?.info?.time?.completed || message?.info?.time?.updated || message?.info?.time?.created || 0)
+  if (value > 0 && value < 1e12) value *= 1000
+  return value
+}
+
+function openCodeText(message) {
+  return (message?.parts || []).filter((part) => part?.type === "text").map((part) => part.text || "").join("\n").trim()
+}
+
+export function openCodeTerminalEvent(session, messages, fallbackTime = Date.now()) {
+  const assistants = (Array.isArray(messages) ? messages : [])
+    .filter((message) => message?.info?.role === "assistant")
+    .sort((left, right) => openCodeTimestamp(right) - openCodeTimestamp(left))
+  const assistant = assistants[0] || null
+  const error = assistant?.info?.error || null
+  const timestamp = openCodeTimestamp(assistant) || Number(session?.updated || 0) || fallbackTime
+  const createdAt = new Date(timestamp > 0 && timestamp < 1e12 ? timestamp * 1000 : timestamp).toISOString()
+  const fingerprint = createHash("sha256").update([
+    session?.serverUrl || "",
+    session?.id || "",
+    assistant?.info?.id || "",
+    String(timestamp),
+    error ? "error" : "idle",
+  ].join("\n")).digest("hex").slice(0, 24)
+  return {
+    version: 1,
+    backend: "opencode",
+    instanceId: session?.instanceId || null,
+    id: `opencode-poll:${fingerprint}`,
+    type: error ? "session.error" : "session.idle",
+    createdAt,
+    sessionId: String(session?.id || ""),
+    title: session?.title || "OpenCode session",
+    directory: session?.directory || "",
+    serverUrl: session?.serverUrl || "",
+    summary: session?.summary || null,
+    excerpt: openCodeText(assistant).slice(0, 1800),
+    error: error ? String(error?.data?.message || error?.message || error?.name || "OpenCode task failed").slice(0, 1000) : null,
+  }
+}
+
+export function sessionStateIdentity(target) {
+  return sessionIdentity({
+    backend: target?.backend || "opencode",
+    serverUrl: target?.serverUrl || null,
+    instanceId: target?.instanceId || null,
+    id: target?.sessionId || target?.id || "",
+  })
 }
 
 async function getSessionView(session) {
@@ -537,6 +605,49 @@ async function main() {
     return client
   }
 
+  const openCodeObserved = new Map()
+  const openCodeMonitorStartedAt = Date.now()
+  let openCodeMonitorInitialized = false
+
+  async function pollOpenCodeTerminals() {
+    const sessions = await discoverOpenCodeSessions()
+    for (const session of sessions) {
+      const key = sessionIdentity(session)
+      let version = Number(session.updated || 0)
+      if (version > 0 && version < 1e12) version *= 1000
+      const current = { version, status: session.status || "idle" }
+      const previous = openCodeObserved.get(key)
+      if (!openCodeMonitorInitialized) {
+        openCodeObserved.set(key, current)
+        continue
+      }
+      const becameIdle = previous && previous.status !== "idle" && current.status === "idle"
+      const changedWhileIdle = current.status === "idle" && previous && current.version > previous.version
+      const recentNewSession = !previous && current.status === "idle" && current.version >= openCodeMonitorStartedAt - 2000
+      if (!becameIdle && !changedWhileIdle && !recentNewSession) {
+        openCodeObserved.set(key, current)
+        continue
+      }
+      try {
+        log("INFO", `OpenCode terminal candidate session=${session.id} status=${current.status}`)
+        const messages = await recentSessionMessages(session, 12)
+        await handleCodexTerminal(openCodeTerminalEvent(session, messages))
+        openCodeObserved.set(key, current)
+      } catch (error) {
+        log("WARN", `OpenCode terminal poll failed session=${session.id}: ${error.message}`)
+      }
+    }
+    if (!openCodeMonitorInitialized) log("INFO", `OpenCode monitor baseline sessions=${sessions.length}`)
+    openCodeMonitorInitialized = true
+  }
+
+  async function openCodeMonitorLoop() {
+    while (true) {
+      try { await pollOpenCodeTerminals() } catch (error) { recordError("opencode-monitor", error) }
+      await sleep(Math.max(2000, Number(config.openCodePollIntervalMs || 5000)))
+    }
+  }
+
   function permissionKeyboard(token) {
     return { inline_keyboard: [
       [{ text: t("allowOnce"), callback_data: `perm:${token}:once` }],
@@ -715,12 +826,7 @@ async function main() {
   function saveState() { atomicJson(statePath, state) }
 
   function sessionStateKey(target) {
-    return sessionIdentity({
-      backend: target?.backend || "opencode",
-      serverUrl: target?.serverUrl || null,
-      instanceId: target?.instanceId || null,
-      id: target?.id || target?.sessionId || "",
-    })
+    return sessionStateIdentity(target)
   }
 
   function migrateSessionState(target) {
@@ -728,7 +834,7 @@ async function main() {
       backend: target?.backend || "opencode",
       serverUrl: target?.serverUrl || null,
       instanceId: target?.instanceId || null,
-      id: target?.id || target?.sessionId || "",
+      id: target?.sessionId || target?.id || "",
     })
   }
 
@@ -1319,15 +1425,9 @@ async function main() {
     return requestJson(sessionUrl(session, `/session/${encodeURIComponent(session.id)}/message`) + `&limit=${limit}`, { headers: openCodeHeaders(session) })
   }
 
-  function messageTimestamp(message) {
-    let value = Number(message?.info?.time?.completed || message?.info?.time?.updated || message?.info?.time?.created || 0)
-    if (value > 0 && value < 1e12) value *= 1000
-    return value
-  }
+  function messageTimestamp(message) { return openCodeTimestamp(message) }
 
-  function messageText(message) {
-    return (message?.parts || []).filter((part) => part?.type === "text").map((part) => part.text || "").join("\n").trim()
-  }
+  function messageText(message) { return openCodeText(message) }
 
   async function synthesizeRecoveredCompletion(session, item) {
     if ((session.backend || "opencode") === "codex") {
@@ -1528,7 +1628,7 @@ async function main() {
     recordError("telegram-startup", error)
     log("WARN", `Telegram startup connection failed; retrying without exiting: ${error.message}`)
   }
-  await Promise.all([telegramLoop(), eventLoop(), recoveryLoop(), permissionLoop(), codexLoop()])
+  await Promise.all([telegramLoop(), eventLoop(), recoveryLoop(), permissionLoop(), codexLoop(), openCodeMonitorLoop()])
 }
 
 async function check() {
@@ -1565,6 +1665,11 @@ function selfTest() {
   if (parseBatch("先运行测试\n---\n再写文档").length !== 2) throw new Error("split batch failed")
   if (eventFingerprint({ type: "session.idle", sessionId: "s", excerpt: "ok" }) !== eventFingerprint({ id: "other", type: "session.idle", sessionId: "s", excerpt: "ok" })) throw new Error("event fingerprint unstable")
   if (eventFingerprint({ type: "session.idle", sessionId: "s", excerpt: "ok" }) === eventFingerprint({ type: "session.idle", sessionId: "s", excerpt: "different" })) throw new Error("event fingerprint collision")
+  const polled = openCodeTerminalEvent({ id: "s", title: "Test", directory: "C:\\work", serverUrl: "http://127.0.0.1:4096", updated: 1700000000000 }, [
+    { info: { id: "m", role: "assistant", time: { completed: 1700000000000 } }, parts: [{ type: "text", text: "done" }] },
+  ])
+  if (polled.type !== "session.idle" || polled.excerpt !== "done" || !polled.id.startsWith("opencode-poll:")) throw new Error("OpenCode terminal polling event failed")
+  if (!sessionStateIdentity({ backend: "opencode", serverUrl: "http://127.0.0.1:4096", id: "event", sessionId: "session" }).endsWith(":session")) throw new Error("event session identity failed")
   if (parseCommand("/remove 2").arg !== 2) throw new Error("parse remove failed")
   if (parseCommand("hello") !== null) throw new Error("free text must not execute")
   if (loopbackBase("http://127.0.0.1:4096/path") !== "http://127.0.0.1:4096") throw new Error("loopback normalize failed")
