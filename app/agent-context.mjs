@@ -66,7 +66,10 @@ export function migrateSessionCollections(state, session, collectionNames = ["qu
 export function encodeSessionAction(action, session) {
   if (!/^[a-z]{1,12}$/.test(String(action || ""))) throw new Error("Invalid callback action")
   const backend = normalizeBackend(session?.backend, "opencode") === "codex" ? "c" : "o"
-  const value = `${action}:${backend}:${String(session?.id || session?.sessionId || "")}`
+  // Terminal events have both an event id and a sessionId. The event id can
+  // contain the thread and turn ids and exceed Telegram's 64-byte callback
+  // limit, while every session action must target the underlying session.
+  const value = `${action}:${backend}:${String(session?.sessionId || session?.id || "")}`
   if (Buffer.byteLength(value, "utf8") > 64) throw new Error("Session callback exceeds Telegram's 64-byte limit")
   return value
 }

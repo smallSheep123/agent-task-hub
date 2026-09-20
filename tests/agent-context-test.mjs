@@ -37,6 +37,14 @@ assert.equal(encodeSessionAction("select", { backend: "codex", id: "abc" }), "se
 assert.deepEqual(decodeSessionAction("select:c:abc", "select"), { backend: "codex", id: "abc" })
 assert.deepEqual(decodeSessionAction("select:legacy", "select"), { backend: "opencode", id: "legacy" })
 assert.equal(decodeSessionAction("show:o:abc", "select"), null)
+const codexCompletion = {
+  backend: "codex",
+  id: "codex:01a0b070-fa08-76c1-bcdf-dfe9be42a1b3:turn-with-a-long-identifier",
+  sessionId: "01a0b070-fa08-76c1-bcdf-dfe9be42a1b3",
+}
+const completionCallback = encodeSessionAction("stopask", codexCompletion)
+assert.equal(completionCallback, "stopask:c:01a0b070-fa08-76c1-bcdf-dfe9be42a1b3")
+assert.ok(Buffer.byteLength(completionCallback, "utf8") <= 64)
 const oldState = { queues: { abc: [{ id: "q1" }] }, queuePaused: { abc: true }, recentEvents: {} }
 const migratedKey = migrateSessionCollections(oldState, { backend: "opencode", serverUrl: "http://127.0.0.1:4096", id: "abc" })
 assert.equal(migratedKey, "opencode:http://127.0.0.1:4096:abc")
