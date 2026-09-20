@@ -124,6 +124,12 @@ The installed OpenCode adapter is `%USERPROFILE%\.config\opencode\plugins\agent-
 
 Tasks started directly on the computer produce notifications but advance a queue only when a stored item was explicitly dispatched.
 
+## Home dashboard
+
+The aggregated home derives active work from each adapter's live session status. For OpenCode, elapsed time starts at the first user message after the latest completed assistant message; queued work uses its persisted dispatch time. For Codex, elapsed time uses the active turn's `startedAt`, including the temporary no-`completedAt` state written by another Desktop client. The dashboard limits detail reads to three active sessions per backend and performs them concurrently.
+
+Pending approval and question records are correlated by backend and session ID. They annotate the matching running conversation without changing the active Telegram agent mode. Idle and historical conversations remain in the paginated session browser.
+
 ## Trust boundaries
 
 - Every Telegram update must match private-chat type, bound user ID, and bound chat ID.

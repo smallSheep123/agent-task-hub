@@ -6,6 +6,7 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { createI18n } from "./locales.mjs"
 import { decodeSessionAction, encodeSessionAction, enterAgentMode, enterGlobalMode, filterAgentSessions, initializeAgentContext, migrateSessionCollections, selectAgentSession, sessionIdentity } from "./agent-context.mjs"
+import { codexTaskStartedAt, isRunningStatus, openCodeTaskStartedAt } from "./dashboard.mjs"
 import { approvalOptionsForRequest, approvalResponseForRequest, CodexAppServer, terminalEventFromNotification } from "../adapters/codex-app-server.mjs"
 import { chooseOpenCodeQuestionOption, completeOpenCodeQuestion, nextOpenCodeQuestionIndex, normalizeOpenCodeQuestion, openCodeQuestionAnswers, openCodeQuestionToken, submitOpenCodeQuestion } from "../adapters/opencode-question.mjs"
 
@@ -453,7 +454,7 @@ async function getSessionView(session) {
   return compact(t("sessionView", info?.title || session.title, status, info?.directory || session.directory, summary, pending.length, latestAssistant(Array.isArray(messages) ? messages : [])))
 }
 
-async function main() {
+async function main(options = {}) {
   ensureDirectories()
   if (!existsSync(configPath)) throw new Error(`Not configured: ${configPath}`)
   const config = readJson(configPath)
@@ -1167,20 +1168,112 @@ async function main() {
     return state.activeBackend === "codex" ? t("codexMode") : t("openCodeMode")
   }
 
-  function homeKeyboard() {
-    return { inline_keyboard: [
+  function shortLine(value, max = 90) {
+    const text = String(value || "").replace(/[\r\n]+/g, " ").trim()
+    return text.length > max ? `${text.slice(0, Math.max(1, max - 1))}…` : text
+  }
+
+  function requestCounts(backend) {
+    if (backend === "opencode") return {
+      approvals: Object.values(state.permissionRequests).filter((item) => !item.resolvedAt).length,
+      questions: Object.values(state.openCodeQuestions).filter((item) => !item.resolvedAt).length,
+    }
+    const requests = Object.values(state.codexRequests).filter((item) => !item.resolvedAt && item.connectionId === codexClient?.connectionId)
+    return {
+      approvals: requests.filter((item) => item.kind === "approval").length,
+      questions: requests.filter((item) => item.kind === "question").length,
+    }
+  }
+
+  function sessionBlocker(session) {
+    const backend = session.backend || "opencode"
+    let approval = false
+    let question = false
+    if (backend === "opencode") {
+      approval = Object.values(state.permissionRequests).some((item) => !item.resolvedAt && item.sessionId === session.id)
+      question = Object.values(state.openCodeQuestions).some((item) => !item.resolvedAt && item.sessionId === session.id)
+    } else {
+      const requests = Object.values(state.codexRequests).filter((item) => !item.resolvedAt && item.connectionId === codexClient?.connectionId && item.params?.threadId === session.id)
+      approval = requests.some((item) => item.kind === "approval")
+      question = requests.some((item) => item.kind === "question")
+    }
+    if (approval && question) return t("homeWaitingBoth")
+    if (approval) return t("homeWaitingApproval")
+    if (question) return t("homeWaitingQuestion")
+    return ""
+  }
+
+  async function taskStartedAt(session) {
+    const key = migrateSessionState(session)
+    const queued = state.queueInFlight[key]
+    const queuedAt = Date.parse(queued?.dispatchedAt || queued?.sentAt || 0)
+    if (Number.isFinite(queuedAt) && queuedAt > 0) return queuedAt
+    try {
+      if ((session.backend || "opencode") === "codex") {
+        const client = await ensureCodexClient(config.codexCommand || null)
+        return codexTaskStartedAt(await client.readThread(session.id))
+      }
+      return openCodeTaskStartedAt(await recentSessionMessages(session, 30))
+    } catch (error) {
+      log("WARN", `dashboard timing unavailable backend=${session.backend || "opencode"} session=${session.id}: ${error.message}`)
+      return 0
+    }
+  }
+
+  function waitingCountForSessions(sessions) {
+    return sessions.reduce((sum, session) => {
+      const queue = state.queues[migrateSessionState(session)]
+      return sum + (Array.isArray(queue) ? queue.length : 0)
+    }, 0)
+  }
+
+  async function homeAgentSection(allSessions, backend) {
+    const sessions = filterAgentSessions(allSessions, backend)
+    const running = sessions.filter((session) => isRunningStatus(session.status))
+    const visible = running.slice(0, 3)
+    const starts = await Promise.all(visible.map((session) => taskStartedAt(session)))
+    const online = backend === "opencode" ? loadInstances().length > 0 : Boolean(codexClient?.ready && codexClient.isRunning)
+    const lines = [t("homeAgentSummary", online ? "🟢" : "🔴", backendText(backend), running.length, waitingCountForSessions(sessions), sessions.length)]
+    if (!visible.length) lines.push(t("homeNoRunning"))
+    visible.forEach((session, index) => {
+      const start = starts[index]
+      const elapsed = start ? durationText(new Date(start).toISOString()) : t("unknownDuration")
+      const blocker = sessionBlocker(session)
+      lines.push(t("homeRunningTask", index + 1, shortLine(session.title, 100), elapsed, blocker ? t("homeBlocked", blocker) : "", shortLine(session.directory, 110) || t("none")))
+    })
+    if (running.length > visible.length) lines.push(t("homeMoreRunning", running.length - visible.length))
+    return { text: lines.join("\n"), running }
+  }
+
+  function homeKeyboard(activeSessions = []) {
+    const rows = [
       [{ text: t("buttonOpenCode"), callback_data: "agent:opencode" }, { text: t("buttonCodex"), callback_data: "agent:codex" }],
-      [{ text: t("buttonAllSessions"), callback_data: "allsessions" }],
-    ] }
+    ]
+    for (const session of activeSessions.slice(0, 4)) rows.push([{
+      text: `▶ ${backendText(session.backend)} · ${shortLine(session.title, 38)}`,
+      callback_data: encodeSessionAction("select", session),
+    }])
+    rows.push([{ text: t("buttonAllSessions"), callback_data: "allsessions" }, { text: t("refresh"), callback_data: "home" }])
+    return { inline_keyboard: rows }
+  }
+
+  async function buildHomePayload() {
+    const sessions = await discoverSessions()
+    const [openCode, codex] = await Promise.all([homeAgentSection(sessions, "opencode"), homeAgentSection(sessions, "codex")])
+    const openRequests = requestCounts("opencode")
+    const codexRequests = requestCounts("codex")
+    const requestSummary = t("homePendingRequests", t("homeRequestCount", openRequests.approvals, openRequests.questions), t("homeRequestCount", codexRequests.approvals, codexRequests.questions))
+    const selected = state.selected ? `${backendText(state.selected.backend)} · ${state.selected.title}` : t("notSelected")
+    const lastError = state.lastError ? t("homeRecentError", state.lastError.scope, shortLine(state.lastError.message, 180)) : ""
+    const text = [t("homeTitle"), t("homeSelected", selected), requestSummary, openCode.text, codex.text, lastError].filter(Boolean).join("\n\n")
+    return { text, reply_markup: homeKeyboard([...openCode.running, ...codex.running]), sessions, running: [...openCode.running, ...codex.running] }
   }
 
   async function commandHome() {
     enterGlobalMode(state)
+    const payload = await buildHomePayload()
     saveState()
-    const sessions = await discoverSessions()
-    const codexCount = filterAgentSessions(sessions, "codex").length
-    const codexState = codexClient?.ready && codexClient.isRunning ? t("sessionCount", codexCount) : t("codexNotConnected")
-    return send(t("home", modeText(), state.selected ? `${backendText(state.selected.backend)} · ${state.selected.title}` : t("notSelected"), filterAgentSessions(sessions, "opencode").length, codexState), { reply_markup: homeKeyboard() })
+    return send(payload.text, { reply_markup: payload.reply_markup })
   }
 
   async function commandAgent(backend) {
@@ -1876,6 +1969,18 @@ async function main() {
     if (announce) await send(t("onlineAnnouncement"))
   }
 
+  if (options.homeCheck) {
+    try { await attachCodexAdapter() } catch {}
+    const payload = await buildHomePayload()
+    const callbacks = payload.reply_markup.inline_keyboard.flat().map((button) => String(button.callback_data || ""))
+    if (!payload.text.includes(t("agentOpenCode")) || !payload.text.includes(t("agentCodex"))) throw new Error("Dashboard agent sections are incomplete")
+    if (payload.text.length > 3900) throw new Error("Dashboard text exceeds Telegram limit")
+    if (callbacks.some((value) => Buffer.byteLength(value, "utf8") > 64)) throw new Error("Dashboard callback exceeds Telegram limit")
+    console.log(`HOME_CHECK=PASS SESSIONS=${payload.sessions.length} RUNNING=${payload.running.length} TEXT=${payload.text.length} BUTTONS=${callbacks.length}`)
+    await codexClient?.stop().catch(() => {})
+    return
+  }
+
   try {
     await attachCodexAdapter()
     log("INFO", "Codex app-server adapter connected")
@@ -1949,6 +2054,7 @@ function selfTest() {
 const mode = process.argv[2] || "run"
 if (mode === "--self-test") selfTest()
 else if (mode === "--check") await check()
+else if (mode === "--home-check") await main({ homeCheck: true })
 else {
   ensureDirectories()
   try {

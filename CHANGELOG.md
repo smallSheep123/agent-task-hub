@@ -18,12 +18,13 @@ All notable changes to this project are documented here.
 - Added unit tests and a read-only `npm run smoke:codex` integration check.
 - Added OpenCode question discovery and Telegram replies for single-choice, multi-choice, free-text, and rejected questions, independent of the selected agent mode.
 - Unified `/questions` and `/answer` across OpenCode and Codex, with newest-presented routing when both agents are waiting.
+- Added a live aggregated-home dashboard with per-agent running conversations, elapsed time, project paths, waiting queue counts, request blockers, refresh, and direct active-session buttons.
 
 ### Changed
 
 - Reduced the visible Telegram command menu to the common daily operations; advanced commands remain available by direct input.
 - Activated the Codex entry when app-server is available and retained a clear connection error when it is not.
-- Updated the package version to 0.2.5.
+- Updated the package version to 0.2.6.
 - Made OpenCode instance refresh tolerant of concurrent Windows file replacement and normalized both idle event forms so terminal notifications are still delivered.
 - Added controller-side OpenCode terminal polling as a fallback for API-started sessions that do not reach the plugin event hook.
 - Grouped OpenCode discovery by local server: ports run in parallel while directories on one server stay sequential, avoiding stale-port delays and local API overload.

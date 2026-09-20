@@ -12,6 +12,7 @@ Agent Task Hub is a Windows-first, multilingual Telegram control center for loca
 
 - Sends a Telegram message when connected OpenCode sessions or monitored Codex turns complete, fail, or are interrupted.
 - Provides one aggregated home with separate OpenCode and Codex entrances; selecting a session switches into that agent's mode.
+- Turns the aggregated home into a live dashboard with each agent's running conversations, elapsed time, project path, queued work, and approval/question blockers.
 - Browses and searches sessions with project paths and pagination.
 - Sends prompts immediately or runs per-session sequential queues with `/add` and `/batch`.
 - Recovers queues after restarts and suppresses duplicate events and notifications.
@@ -70,6 +71,8 @@ OpenCode questions are discovered independently of the selected Telegram mode. S
 Codex turns started through the Hub keep their live app-server connection, so approvals and questions can be answered from Telegram. For a turn started in another Codex client, the Hub detects and aggregates its terminal completion; live approvals and questions remain in the client that owns that app-server connection.
 
 The main command menu stays small. Advanced queue, approval, and diagnostic commands remain accepted. Buttons carry the action, backend, and session identity, so changing modes does not require repeatedly typing identifiers.
+
+The home dashboard lists up to three running conversations per agent and adds direct session buttons for the busiest items. Use **Refresh** to recalculate elapsed time and current blockers; use **All sessions** for history and idle conversations.
 
 ## Management
 
