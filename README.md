@@ -11,6 +11,7 @@ Agent Task Hub is a Windows-first, multilingual Telegram control center for loca
 ## What it does
 
 - Sends a Telegram message whenever any connected OpenCode session completes or fails.
+- Provides one aggregated home with separate OpenCode and Codex entrances; selecting a session switches into that agent's mode.
 - Browses and searches sessions with project paths and pagination.
 - Sends prompts immediately or runs per-session sequential queues with `/add` and `/batch`.
 - Recovers queues after restarts and suppresses duplicate events and notifications.
@@ -27,7 +28,7 @@ Requirements: Windows 10/11, OpenCode Desktop, Node.js 20+, and a Telegram bot f
 2. Double-click `Bridge-Manager.cmd`.
 3. Choose **简体中文** or **English**. The choice is remembered and can be changed later with `L`.
 4. Choose first-time setup, paste the BotFather token, send `/start` to the bot, and confirm your Telegram account.
-5. Restart OpenCode Desktop once, then send `/sessions` to the bot.
+5. Restart OpenCode Desktop once, then send `/home` to the bot and enter **OpenCode**.
 
 Setup installs the adapter as `%USERPROFILE%\.config\opencode\plugins\agent-task-hub.js`, stores runtime data in `%USERPROFILE%\.config\agent-task-hub`, and creates an `Agent Task Hub` scheduled task. These names are intentionally separate from the earlier OpenCode Telegram Bridge project, so both codebases do not share state or startup entries.
 
@@ -35,12 +36,14 @@ Setup installs the adapter as `%USERPROFILE%\.config\opencode\plugins\agent-task
 
 | Command | Purpose |
 |---|---|
-| `/sessions` or `/sessions 2` | Browse sessions by page |
+| `/home` | Open the aggregated agent home |
+| `/opencode`, `/codex` | Enter an agent-specific mode; Codex currently reports that its adapter is unavailable |
+| `/sessions` or `/sessions 2` | Browse sessions from all connected agents |
 | `/find keyword` | Search session titles and project paths |
 | `/use 1` | Select a session from the current page |
-| `/show` | Show status, changes, todos, and the latest reply |
-| `/send prompt` | Send one prompt immediately |
-| `/add prompt` | Append one prompt to the selected session queue |
+| `/current`, `/show` | Show the current mode, selected session, status, changes, todos, and latest reply |
+| `/send prompt` | Send one prompt immediately in the selected agent session |
+| `/add prompt` | Append one prompt to the selected agent session queue |
 | `/batch` | Queue prompts separated by a line containing `---` |
 | `/queue`, `/remove 2` | Inspect or edit waiting queue items |
 | `/pause`, `/resume`, `/clearqueue` | Control automatic queue progress |
@@ -60,6 +63,8 @@ Write a short maintenance note
 ```
 
 Each item starts after the preceding completion event. The bot reports every completion before dispatching the next item, then sends a final message when the queue is empty. Tasks started manually on the computer are reported without accidentally advancing an unrelated queue.
+
+The main command menu stays small. Advanced queue, approval, and diagnostic commands remain accepted. Buttons carry the action, backend, and session identity, so changing modes does not require repeatedly typing identifiers.
 
 ## Management
 

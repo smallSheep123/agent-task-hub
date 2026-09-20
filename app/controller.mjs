@@ -5,6 +5,7 @@ import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { createI18n } from "./locales.mjs"
+import { decodeSessionAction, encodeSessionAction, enterAgentMode, enterGlobalMode, filterAgentSessions, initializeAgentContext, migrateSessionCollections, selectAgentSession, sessionIdentity } from "./agent-context.mjs"
 
 const appDir = dirname(fileURLToPath(import.meta.url))
 const dataRoot = process.env.AGENT_TASK_HUB_DATA_DIR || join(homedir(), ".config", "agent-task-hub")
@@ -120,7 +121,11 @@ export function loopbackBase(value) {
 export function parseCommand(text) {
   const value = String(text || "").trim()
   let match
-  if (/^\/(start|help)(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "help" }
+  if (/^\/start(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "home" }
+  if (/^\/home(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "home" }
+  if (/^\/opencode(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "opencode" }
+  if (/^\/codex(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "codex" }
+  if (/^\/help(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "help" }
   if (/^\/status(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "status" }
   if ((match = value.match(/^\/sessions(?:@[A-Za-z0-9_]+)?(?:\s+([1-9]\d{0,3}))?$/i))) return { name: "sessions", arg: Number.parseInt(match[1] || "1", 10) }
   if ((match = value.match(/^\/find(?:@[A-Za-z0-9_]+)?\s+([\s\S]{1,120})$/i))) return { name: "find", arg: match[1].trim() }
@@ -267,6 +272,8 @@ async function discoverSessions() {
       for (const info of Array.isArray(sessions) ? sessions : []) {
         const item = {
           id: info.id,
+          backend: "opencode",
+          instanceId: instance.instanceId || null,
           title: info.title || t("unnamedSession"),
           directory: info.directory || instance.directory,
           updated: info.time?.updated || info.time?.created || 0,
@@ -318,13 +325,14 @@ async function main() {
   const apiBase = `https://api.telegram.org/bot${botToken}`
   const botCommands = i18n.commands()
   const state = readJson(statePath, { updateOffset: 0, selected: null, sessionMap: [] })
+  initializeAgentContext(state)
   state.queues ||= {}
   state.queueInFlight ||= {}
   state.queuePaused ||= {}
   state.queueStartOnIdle ||= {}
   state.processedEventIds ||= []
   state.recentEvents ||= {}
-  state.sessionBrowser ||= { mode: "sessions", query: "", page: 1 }
+  state.sessionBrowser ||= { mode: "sessions", query: "", page: 1, backend: "all" }
   state.permissionRequests ||= {}
   state.lastError ||= null
   const startedAt = new Date().toISOString()
@@ -522,6 +530,24 @@ async function main() {
 
   function saveState() { atomicJson(statePath, state) }
 
+  function sessionStateKey(target) {
+    return sessionIdentity({
+      backend: target?.backend || "opencode",
+      serverUrl: target?.serverUrl || null,
+      instanceId: target?.instanceId || null,
+      id: target?.id || target?.sessionId || "",
+    })
+  }
+
+  function migrateSessionState(target) {
+    return migrateSessionCollections(state, {
+      backend: target?.backend || "opencode",
+      serverUrl: target?.serverUrl || null,
+      instanceId: target?.instanceId || null,
+      id: target?.id || target?.sessionId || "",
+    })
+  }
+
   function recordError(scope, error) {
     state.lastError = { scope, message: compact(error?.message || error, 500), at: new Date().toISOString() }
     saveState()
@@ -531,22 +557,23 @@ async function main() {
     const id = String(event.id || "")
     if (id && !state.processedEventIds.includes(id)) state.processedEventIds.push(id)
     state.processedEventIds = state.processedEventIds.slice(-500)
-    if (event.sessionId) state.recentEvents[event.sessionId] = { fingerprint: eventFingerprint(event), at: event.createdAt || new Date().toISOString() }
+    if (event.sessionId) state.recentEvents[migrateSessionState(event)] = { fingerprint: eventFingerprint(event), at: event.createdAt || new Date().toISOString() }
     saveState()
   }
 
   function eventAlreadyHandled(event, activeQueueItem = null) {
     if (event.id && state.processedEventIds.includes(String(event.id))) return true
     if (activeQueueItem && Date.parse(event.createdAt || 0) >= Date.parse(activeQueueItem.dispatchedAt || 0)) return false
-    const recent = event.sessionId ? state.recentEvents[event.sessionId] : null
+    const recent = event.sessionId ? state.recentEvents[migrateSessionState(event)] : null
     return Boolean(recent
       && recent.fingerprint === eventFingerprint(event)
       && Math.abs(Date.parse(event.createdAt || 0) - Date.parse(recent.at || 0)) < 15000)
   }
 
-  function waitingQueue(sessionId) {
-    if (!Array.isArray(state.queues[sessionId])) state.queues[sessionId] = []
-    return state.queues[sessionId]
+  function waitingQueue(session) {
+    const key = migrateSessionState(session)
+    if (!Array.isArray(state.queues[key])) state.queues[key] = []
+    return state.queues[key]
   }
 
   async function currentSessionStatus(session) {
@@ -559,13 +586,14 @@ async function main() {
   }
 
   async function dispatchNext(session) {
-    const queue = waitingQueue(session.id)
-    if (state.queuePaused[session.id] || state.queueInFlight[session.id] || queue.length === 0) return null
+    const key = migrateSessionState(session)
+    const queue = waitingQueue(session)
+    if (state.queuePaused[key] || state.queueInFlight[key] || queue.length === 0) return null
     const item = queue.shift()
     item.dispatchedAt = new Date().toISOString()
     item.dispatchState = "dispatching"
-    state.queueInFlight[session.id] = item
-    state.queueStartOnIdle[session.id] = false
+    state.queueInFlight[key] = item
+    state.queueStartOnIdle[key] = false
     saveState()
     try {
       await requestSessionJson(session, `/session/${encodeURIComponent(session.id)}/prompt_async`, {
@@ -575,22 +603,23 @@ async function main() {
       })
       item.dispatchState = "sent"
       item.sentAt = new Date().toISOString()
-      state.queueInFlight[session.id] = item
+      state.queueInFlight[key] = item
       saveState()
       log("AUDIT", `queue dispatched session=${session.id} item=${item.id} remaining=${queue.length}`)
       return { item, remaining: queue.length }
     } catch (error) {
       queue.unshift(item)
-      delete state.queueInFlight[session.id]
+      delete state.queueInFlight[key]
       saveState()
       throw error
     }
   }
 
   function queueSummary(session) {
-    const queue = waitingQueue(session.id)
-    const active = state.queueInFlight[session.id]
-    const paused = Boolean(state.queuePaused[session.id])
+    const key = migrateSessionState(session)
+    const queue = waitingQueue(session)
+    const active = state.queueInFlight[key]
+    const paused = Boolean(state.queuePaused[key])
     const lines = [
       t("queueState", paused ? t("queuePaused") : t("queueAutomatic")),
       t("activeQueue", active ? `${active.batchTotal > 1 ? `[${active.batchIndex}/${active.batchTotal}] ` : ""}${active.text}` : t("none")),
@@ -632,14 +661,64 @@ async function main() {
     return compact(t("health", openCode, instances.length, sessions.length, state.selected?.title || t("notSelected"), approvals, running, waiting, paused, durationText(startedAt), lastError))
   }
 
-  async function selectSession(session) {
-    state.selected = { id: session.id, title: session.title, directory: session.directory, serverUrl: loopbackBase(session.serverUrl), status: session.status || "idle", auth: session.auth || null }
-    saveState()
-    await send(t("selected", session.title, session.id, session.directory))
+  function backendText(backend) {
+    return backend === "codex" ? t("agentCodex") : t("agentOpenCode")
   }
 
-  async function commandSessions(page = 1, query = "") {
-    const all = await discoverSessions()
+  function modeText() {
+    if (state.viewMode !== "agent") return t("globalMode")
+    return state.activeBackend === "codex" ? t("codexMode") : t("openCodeMode")
+  }
+
+  function homeKeyboard() {
+    return { inline_keyboard: [
+      [{ text: t("buttonOpenCode"), callback_data: "agent:opencode" }, { text: t("buttonCodex"), callback_data: "agent:codex" }],
+      [{ text: t("buttonAllSessions"), callback_data: "allsessions" }],
+    ] }
+  }
+
+  async function commandHome() {
+    enterGlobalMode(state)
+    saveState()
+    const sessions = await discoverSessions()
+    return send(t("home", modeText(), state.selected ? `${backendText(state.selected.backend)} · ${state.selected.title}` : t("notSelected"), filterAgentSessions(sessions, "opencode").length, t("codexNotConnected")), { reply_markup: homeKeyboard() })
+  }
+
+  async function commandAgent(backend) {
+    enterAgentMode(state, backend)
+    if (backend === "codex") {
+      state.sessionMap = []
+      state.sessionBrowser = { mode: "sessions", query: "", page: 1, backend: "codex" }
+      saveState()
+      return send(t("codexUnavailable"), { reply_markup: { inline_keyboard: [[{ text: t("buttonHome"), callback_data: "home" }, { text: t("buttonOpenCode"), callback_data: "agent:opencode" }]] } })
+    }
+    saveState()
+    return commandSessions(1, "", "opencode")
+  }
+
+  async function selectSession(session) {
+    const selected = {
+      id: session.id,
+      backend: session.backend || "opencode",
+      instanceId: session.instanceId || null,
+      title: session.title,
+      directory: session.directory,
+      serverUrl: loopbackBase(session.serverUrl),
+      status: session.status || "idle",
+      auth: session.auth || null,
+    }
+    selectAgentSession(state, selected)
+    saveState()
+    await send(t("selected", backendText(selected.backend), selected.title, selected.id, selected.directory), { reply_markup: { inline_keyboard: [
+      [{ text: t("viewDetails"), callback_data: encodeSessionAction("show", selected) }, { text: t("append"), callback_data: encodeSessionAction("addhelp", selected) }],
+      [{ text: t("viewQueue"), callback_data: encodeSessionAction("queue", selected) }, { text: t("stopTask"), callback_data: encodeSessionAction("stopask", selected) }],
+      [{ text: t("buttonAllSessions"), callback_data: "allsessions" }, { text: t("buttonHome"), callback_data: "home" }],
+    ] } })
+  }
+
+  async function commandSessions(page = 1, query = "", backend = "all") {
+    const discovered = await discoverSessions()
+    const all = filterAgentSessions(discovered, backend)
     const needle = String(query || "").trim().toLowerCase()
     const filtered = needle
       ? all.filter((item) => `${item.title}\n${item.directory}`.toLowerCase().includes(needle))
@@ -650,16 +729,16 @@ async function main() {
     const start = (currentPage - 1) * pageSize
     const sessions = filtered.slice(start, start + pageSize)
     state.sessionMap = sessions
-    state.sessionBrowser = { mode: needle ? "find" : "sessions", query: String(query || "").trim(), page: currentPage }
+    state.sessionBrowser = { mode: needle ? "find" : "sessions", query: String(query || "").trim(), page: currentPage, backend }
     saveState()
-    if (!filtered.length) return send(needle ? t("noSearch", compact(query, 80)) : t("noSessions"))
+    if (!filtered.length) return send(needle ? t("noSearch", compact(query, 80)) : t("noSessions"), { reply_markup: { inline_keyboard: [[{ text: t("buttonHome"), callback_data: "home" }]] } })
     const lines = sessions.map((item, index) => {
-      const selectedMark = state.selected?.id === item.id ? "✅ " : ""
-      return `${index + 1}. ${selectedMark}[${item.status}] ${item.title}\n   ${item.directory}`
+      const selectedMark = state.selected?.id === item.id && (state.selected?.backend || "opencode") === (item.backend || "opencode") ? "✅ " : ""
+      return `${index + 1}. ${selectedMark}[${backendText(item.backend)} · ${item.status}] ${item.title}\n   ${item.directory}`
     })
     const keyboard = sessions.map((item, index) => [{
-      text: `${state.selected?.id === item.id ? "✅ " : ""}${index + 1}. ${item.title}`.slice(0, 52),
-      callback_data: `select:${item.id}`,
+      text: `${state.selected?.id === item.id && (state.selected?.backend || "opencode") === (item.backend || "opencode") ? "✅ " : ""}${index + 1}. ${backendText(item.backend)} · ${item.title}`.slice(0, 52),
+      callback_data: encodeSessionAction("select", item),
     }])
     const nav = []
     const prefix = needle ? "findpage" : "sessionspage"
@@ -667,12 +746,15 @@ async function main() {
     nav.push({ text: `${currentPage}/${pageCount}`, callback_data: "noop" })
     if (currentPage < pageCount) nav.push({ text: t("next"), callback_data: `${prefix}:${currentPage + 1}` })
     keyboard.push(nav)
-    const heading = needle ? t("searchHeading", compact(query, 80)) : t("sessionsHeading")
+    keyboard.push([{ text: t("buttonOpenCode"), callback_data: "agent:opencode" }, { text: t("buttonCodex"), callback_data: "agent:codex" }, { text: t("buttonHome"), callback_data: "home" }])
+    const heading = needle ? t("searchHeading", compact(query, 80)) : backend === "opencode" ? t("openCodeSessionsHeading") : backend === "codex" ? t("codexSessionsHeading") : t("sessionsHeading")
     await send(t("page", heading, filtered.length, currentPage, pageCount, lines.join("\n")), { reply_markup: { inline_keyboard: keyboard } })
   }
 
   async function resolveSelected() {
-    if (!state.selected) return null
+    if (state.viewMode !== "agent" || !state.selected) return null
+    if ((state.selected.backend || "opencode") !== state.activeBackend) return null
+    if (state.activeBackend !== "opencode") return null
     loopbackBase(state.selected.serverUrl)
     return state.selected
   }
@@ -680,7 +762,10 @@ async function main() {
   async function handleCommand(command) {
     if (!command) return send(t("unknownCommand"))
     if (command.name === "help") return send(t("help"))
-    if (command.name === "status") return send(t("status", loadInstances().length, state.selected?.title || t("notSelected")))
+    if (command.name === "home") return commandHome()
+    if (command.name === "opencode") return commandAgent("opencode")
+    if (command.name === "codex") return commandAgent("codex")
+    if (command.name === "status") return send(t("status", loadInstances().length, modeText(), state.selected ? `${backendText(state.selected.backend)} · ${state.selected.title}` : t("notSelected")))
     if (command.name === "health") return send(await healthText())
     if (command.name === "approvals") {
       await refreshPermissions()
@@ -689,8 +774,15 @@ async function main() {
       for (const [token, item] of pending.slice(0, 10)) await sendPermissionRequest(token, item, true)
       return
     }
-    if (command.name === "sessions") return commandSessions(command.arg || 1)
-    if (command.name === "find") return commandSessions(1, command.arg)
+    if (command.name === "sessions") {
+      enterGlobalMode(state)
+      saveState()
+      return commandSessions(command.arg || 1, "", "all")
+    }
+    if (command.name === "find") {
+      if (state.viewMode === "agent" && state.activeBackend === "codex") return send(t("codexUnavailable"))
+      return commandSessions(1, command.arg, state.viewMode === "agent" ? state.activeBackend : "all")
+    }
     if (command.name === "use") {
       let session = null
       const index = Number.parseInt(command.arg, 10)
@@ -702,21 +794,27 @@ async function main() {
       }
       return session ? selectSession(session) : send(t("sessionNotFound"))
     }
+    if (command.name === "current") {
+      if (state.viewMode === "agent" && state.activeBackend === "codex") return send(t("codexUnavailable"))
+      if (state.viewMode !== "agent") return commandHome()
+      const selected = await resolveSelected()
+      return selected ? send(t("selected", backendText(selected.backend), selected.title, selected.id, selected.directory)) : send(t("selectFirst"))
+    }
     const selected = await resolveSelected()
-    if (command.name === "current") return selected ? send(t("current", selected.title, selected.id, selected.directory)) : send(t("selectFirst"))
     if (!selected) return send(t("selectFirst"))
     if (command.name === "show") return send(await getSessionView(selected))
     if (command.name === "queue") return send(queueSummary(selected))
     if (command.name === "add") {
-      const queue = waitingQueue(selected.id)
+      const key = migrateSessionState(selected)
+      const queue = waitingQueue(selected)
       const limit = Number(config.queueLimit || 20)
-      const occupied = queue.length + (state.queueInFlight[selected.id] ? 1 : 0)
+      const occupied = queue.length + (state.queueInFlight[key] ? 1 : 0)
       if (occupied >= limit) return send(t("queueFull", limit))
       const [item] = makeQueueItems([command.arg])
       queue.push(item)
       saveState()
       const status = await currentSessionStatus(selected)
-      if (status === "idle" && !state.queuePaused[selected.id] && !state.queueInFlight[selected.id]) {
+      if (status === "idle" && !state.queuePaused[key] && !state.queueInFlight[key]) {
         try {
           const started = await dispatchNext(selected)
           if (started) return send(t("addStarted", compact(started.item.text, 500), started.remaining))
@@ -724,21 +822,22 @@ async function main() {
           return send(t("savedStartFailed", compact(error.message, 300)))
         }
       }
-      state.queueStartOnIdle[selected.id] = status !== "idle"
+      state.queueStartOnIdle[key] = status !== "idle"
       saveState()
       return send(t("added", status, queue.length))
     }
     if (command.name === "batch") {
-      const queue = waitingQueue(selected.id)
+      const key = migrateSessionState(selected)
+      const queue = waitingQueue(selected)
       const limit = Number(config.queueLimit || 20)
       let parts
       try { parts = parseBatch(command.arg, limit) } catch (error) { return send(error.message) }
-      const occupied = queue.length + (state.queueInFlight[selected.id] ? 1 : 0)
+      const occupied = queue.length + (state.queueInFlight[key] ? 1 : 0)
       if (occupied + parts.length > limit) return send(t("batchCapacity", limit, Math.max(0, limit - occupied)))
       queue.push(...makeQueueItems(parts))
       saveState()
       const status = await currentSessionStatus(selected)
-      if (status === "idle" && !state.queuePaused[selected.id] && !state.queueInFlight[selected.id]) {
+      if (status === "idle" && !state.queuePaused[key] && !state.queueInFlight[key]) {
         try {
           const started = await dispatchNext(selected)
           if (started) return send(t("batchStarted", parts.length, compact(started.item.text, 500), started.remaining))
@@ -746,12 +845,12 @@ async function main() {
           return send(t("batchSavedFailed", parts.length, compact(error.message, 300)))
         }
       }
-      state.queueStartOnIdle[selected.id] = status !== "idle"
+      state.queueStartOnIdle[key] = status !== "idle"
       saveState()
       return send(t("batchAdded", parts.length, status, queue.length))
     }
     if (command.name === "remove") {
-      const queue = waitingQueue(selected.id)
+      const queue = waitingQueue(selected)
       const index = command.arg - 1
       if (index < 0 || index >= queue.length) return send(t("badQueueIndex"))
       const [removed] = queue.splice(index, 1)
@@ -759,15 +858,16 @@ async function main() {
       return send(t("removed", compact(removed.text, 500)))
     }
     if (command.name === "pause") {
-      state.queuePaused[selected.id] = true
+      state.queuePaused[migrateSessionState(selected)] = true
       saveState()
       return send(t("paused"))
     }
     if (command.name === "resume") {
-      state.queuePaused[selected.id] = false
+      const key = migrateSessionState(selected)
+      state.queuePaused[key] = false
       saveState()
       const status = await currentSessionStatus(selected)
-      if (status === "idle" && !state.queueInFlight[selected.id]) {
+      if (status === "idle" && !state.queueInFlight[key]) {
         try {
           const started = await dispatchNext(selected)
           if (started) return send(t("resumedStarted", compact(started.item.text, 500), started.remaining))
@@ -775,14 +875,14 @@ async function main() {
           return send(t("resumedFailed", compact(error.message, 300)))
         }
       }
-      state.queueStartOnIdle[selected.id] = status !== "idle" && waitingQueue(selected.id).length > 0
+      state.queueStartOnIdle[key] = status !== "idle" && waitingQueue(selected).length > 0
       saveState()
       return send(t("resumed", status))
     }
     if (command.name === "clearqueue") {
-      const count = waitingQueue(selected.id).length
+      const count = waitingQueue(selected).length
       if (!count) return send(t("queueEmpty"))
-      return send(t("confirmClear", count), { reply_markup: { inline_keyboard: [[{ text: t("confirmClearButton"), callback_data: `clearq:${selected.id}` }, { text: t("cancel"), callback_data: "cancel" }]] } })
+      return send(t("confirmClear", count), { reply_markup: { inline_keyboard: [[{ text: t("confirmClearButton"), callback_data: encodeSessionAction("clearq", selected) }, { text: t("cancel"), callback_data: "cancel" }]] } })
     }
     if (command.name === "send") {
       const id = encodeURIComponent(selected.id)
@@ -794,7 +894,7 @@ async function main() {
       return send(t("sent"))
     }
     if (command.name === "stop") {
-      return send(t("confirmStop", selected.title), { reply_markup: { inline_keyboard: [[{ text: t("confirmStopButton"), callback_data: `abort:${selected.id}` }, { text: t("cancel"), callback_data: "cancel" }]] } })
+      return send(t("confirmStop", selected.title), { reply_markup: { inline_keyboard: [[{ text: t("confirmStopButton"), callback_data: encodeSessionAction("abort", selected) }, { text: t("cancel"), callback_data: "cancel" }]] } })
     }
   }
 
@@ -828,60 +928,74 @@ async function main() {
       }
       else if (data === "noop") await telegram("answerCallbackQuery", { callback_query_id: query.id })
       else if (data === "cancel") await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("cancelled") })
+      else if (data === "home") {
+        await telegram("answerCallbackQuery", { callback_query_id: query.id })
+        await commandHome()
+      } else if (data === "allsessions") {
+        await telegram("answerCallbackQuery", { callback_query_id: query.id })
+        enterGlobalMode(state)
+        saveState()
+        await commandSessions(1, "", "all")
+      } else if (data.startsWith("agent:")) {
+        const backend = data.slice(6)
+        await telegram("answerCallbackQuery", { callback_query_id: query.id, text: backendText(backend) })
+        await commandAgent(backend)
+      }
       else if (data.startsWith("sessionspage:")) {
         await telegram("answerCallbackQuery", { callback_query_id: query.id })
-        await commandSessions(Number.parseInt(data.slice(13), 10) || 1)
+        await commandSessions(Number.parseInt(data.slice(13), 10) || 1, "", state.sessionBrowser?.backend || "all")
       } else if (data.startsWith("findpage:")) {
         await telegram("answerCallbackQuery", { callback_query_id: query.id })
-        await commandSessions(Number.parseInt(data.slice(9), 10) || 1, state.sessionBrowser?.query || "")
+        await commandSessions(Number.parseInt(data.slice(9), 10) || 1, state.sessionBrowser?.query || "", state.sessionBrowser?.backend || "all")
       }
       else if (data.startsWith("select:")) {
-        const id = data.slice(7)
-        const session = (await discoverSessions()).find((item) => item.id === id)
+        const target = decodeSessionAction(data, "select")
+        const session = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
         if (!session) throw new Error(t("sessionUnavailable"))
         await selectSession(session)
         await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("setCurrent") })
       } else if (data.startsWith("show:")) {
-        const id = data.slice(5)
-        const session = (await discoverSessions()).find((item) => item.id === id)
+        const target = decodeSessionAction(data, "show")
+        const session = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
         if (!session) throw new Error(t("sessionUnavailable"))
         await send(await getSessionView(session))
         await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("detailSent") })
       } else if (data.startsWith("addhelp:")) {
-        const id = data.slice(8)
-        const session = (await discoverSessions()).find((item) => item.id === id)
+        const target = decodeSessionAction(data, "addhelp")
+        const session = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
         if (!session) throw new Error(t("sessionUnavailable"))
-        state.selected = { id: session.id, title: session.title, directory: session.directory, serverUrl: loopbackBase(session.serverUrl), status: session.status || "idle", auth: session.auth || null }
+        selectAgentSession(state, { id: session.id, backend: session.backend || "opencode", instanceId: session.instanceId || null, title: session.title, directory: session.directory, serverUrl: loopbackBase(session.serverUrl), status: session.status || "idle", auth: session.auth || null })
         saveState()
         await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("setCurrent") })
         await send(t("addHelp", session.title))
       } else if (data.startsWith("queue:")) {
-        const id = data.slice(6)
-        const session = (await discoverSessions()).find((item) => item.id === id)
+        const target = decodeSessionAction(data, "queue")
+        const session = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
         if (!session) throw new Error(t("sessionUnavailable"))
         await send(queueSummary(session))
         await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("queueSent") })
       } else if (data.startsWith("stopask:")) {
-        const id = data.slice(8)
-        const session = (await discoverSessions()).find((item) => item.id === id)
+        const target = decodeSessionAction(data, "stopask")
+        const session = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
         if (!session) throw new Error(t("sessionUnavailable"))
         await telegram("answerCallbackQuery", { callback_query_id: query.id })
-        await send(t("confirmStop", session.title), { reply_markup: { inline_keyboard: [[{ text: t("confirmStopButton"), callback_data: `abort:${session.id}` }, { text: t("cancel"), callback_data: "cancel" }]] } })
+        await send(t("confirmStop", session.title), { reply_markup: { inline_keyboard: [[{ text: t("confirmStopButton"), callback_data: encodeSessionAction("abort", session) }, { text: t("cancel"), callback_data: "cancel" }]] } })
       } else if (data.startsWith("abort:")) {
-        const id = data.slice(6)
-        const selected = (await discoverSessions()).find((item) => item.id === id)
+        const target = decodeSessionAction(data, "abort")
+        const selected = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
         if (!selected) throw new Error(t("sessionUnavailable"))
-        state.queuePaused[id] = true
-        state.queueStartOnIdle[id] = false
+        const key = migrateSessionState(selected)
+        state.queuePaused[key] = true
+        state.queueStartOnIdle[key] = false
         saveState()
-        await requestSessionJson(selected, `/session/${encodeURIComponent(id)}/abort`, { method: "POST" })
+        await requestSessionJson(selected, `/session/${encodeURIComponent(selected.id)}/abort`, { method: "POST" })
         await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("stopRequested") })
         await send(t("stopDone"))
       } else if (data.startsWith("clearq:")) {
-        const id = data.slice(7)
+        const target = decodeSessionAction(data, "clearq")
         const selected = await resolveSelected()
-        if (!selected || selected.id !== id) throw new Error(t("currentChanged"))
-        state.queues[id] = []
+        if (!selected || selected.id !== target?.id || (selected.backend || "opencode") !== target?.backend) throw new Error(t("currentChanged"))
+        state.queues[migrateSessionState(selected)] = []
         saveState()
         await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("queueCleared") })
         await send(t("queueClearedDetail"))
@@ -926,20 +1040,22 @@ async function main() {
 
   function completionButtons(event) {
     if (!event.sessionId) return {}
-    const current = state.selected?.id === event.sessionId
+    const backend = event.backend || "opencode"
+    const current = state.selected?.id === event.sessionId && (state.selected?.backend || "opencode") === backend
     return { reply_markup: { inline_keyboard: [
-      [{ text: current ? t("currentSession") : t("setAsCurrent"), callback_data: `select:${event.sessionId}` }, { text: t("viewDetails"), callback_data: `show:${event.sessionId}` }],
-      [{ text: t("append"), callback_data: `addhelp:${event.sessionId}` }, { text: t("viewQueue"), callback_data: `queue:${event.sessionId}` }],
-      [{ text: t("stopTask"), callback_data: `stopask:${event.sessionId}` }],
+      [{ text: current ? t("currentSession") : t("enterSession"), callback_data: encodeSessionAction("select", event) }, { text: t("viewDetails"), callback_data: encodeSessionAction("show", event) }],
+      [{ text: t("append"), callback_data: encodeSessionAction("addhelp", event) }, { text: t("viewQueue"), callback_data: encodeSessionAction("queue", event) }],
+      [{ text: t("stopTask"), callback_data: encodeSessionAction("stopask", event) }, { text: t("buttonHome"), callback_data: "home" }],
     ] } }
   }
 
-  function pendingCompletionExists(sessionId, dispatchedAt) {
+  function pendingCompletionExists(session, dispatchedAt) {
+    const expectedKey = sessionStateKey(session)
     return readdirSync(eventsDir, { withFileTypes: true })
       .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
       .some((entry) => {
         const event = readJson(join(eventsDir, entry.name))
-        return event?.sessionId === sessionId && Date.parse(event.createdAt || 0) >= Date.parse(dispatchedAt || 0)
+        return event?.sessionId && sessionStateKey(event) === expectedKey && Date.parse(event.createdAt || 0) >= Date.parse(dispatchedAt || 0)
       })
   }
 
@@ -972,6 +1088,7 @@ async function main() {
       version: 1,
       id: `recovered-${randomUUID()}`,
       type: "session.idle",
+      backend: session.backend || "opencode",
       createdAt: new Date().toISOString(),
       sessionId: session.id,
       title: session.title,
@@ -989,25 +1106,28 @@ async function main() {
     const activeEntries = Object.entries(state.queueInFlight)
     if (!activeEntries.length) return
     const sessions = await discoverSessions()
-    const byId = new Map(sessions.map((session) => [session.id, session]))
-    for (const [sessionId, item] of activeEntries) {
-      const session = byId.get(sessionId)
+    const byKey = new Map(sessions.map((session) => [sessionStateKey(session), session]))
+    const byLegacyId = new Map(sessions.map((session) => [session.id, session]))
+    for (const [storedKey, originalItem] of activeEntries) {
+      const session = byKey.get(storedKey) || byLegacyId.get(storedKey)
       if (!session) continue
+      const key = migrateSessionState(session)
+      const item = state.queueInFlight[key] || originalItem
       const status = await currentSessionStatus(session)
       if (status !== "idle") continue
-      if (pendingCompletionExists(sessionId, item.dispatchedAt)) continue
+      if (pendingCompletionExists(session, item.dispatchedAt)) continue
       try {
         if (await synthesizeRecoveredCompletion(session, item)) {
-          log("INFO", `recovered completed queue item session=${sessionId} item=${item.id}`)
+          log("INFO", `recovered completed queue item session=${session.id} item=${item.id}`)
           continue
         }
-        waitingQueue(sessionId).unshift(item)
-        delete state.queueInFlight[sessionId]
+        waitingQueue(session).unshift(item)
+        delete state.queueInFlight[key]
         saveState()
-        if (!state.queuePaused[sessionId]) await dispatchNext(session)
+        if (!state.queuePaused[key]) await dispatchNext(session)
       } catch (error) {
         recordError("queue-recovery", error)
-        log("WARN", `queue recovery failed session=${sessionId}: ${error.message}`)
+        log("WARN", `queue recovery failed session=${session.id}: ${error.message}`)
       }
     }
   }
@@ -1041,46 +1161,47 @@ async function main() {
         if (!event) { rmSync(path, { force: true }); continue }
         if (event.nextAttemptAt && Date.parse(event.nextAttemptAt) > Date.now()) continue
         if (Date.now() - Date.parse(event.createdAt || 0) > 7 * 86400000) { rmSync(path, { force: true }); continue }
-        const activeQueueItem = event.sessionId ? state.queueInFlight[event.sessionId] : null
+        const eventKey = event.sessionId ? migrateSessionState(event) : null
+        const activeQueueItem = eventKey ? state.queueInFlight[eventKey] : null
         const matchesQueue = Boolean(activeQueueItem && Date.parse(event.createdAt || 0) >= Date.parse(activeQueueItem.dispatchedAt || 0))
         if (eventAlreadyHandled(event, matchesQueue ? activeQueueItem : null)) {
           rmSync(path, { force: true })
           log("INFO", `duplicate completion ignored event=${event.id || name} session=${event.sessionId || "none"}`)
           continue
         }
-        const waiting = event.sessionId ? waitingQueue(event.sessionId).length : 0
+        const waiting = event.sessionId ? waitingQueue(event).length : 0
         const isError = event.type === "session.error"
         let queueNote = t("manualSource")
         if (matchesQueue) {
           const progress = activeQueueItem.batchTotal > 1 ? t("itemProgress", activeQueueItem.batchIndex, activeQueueItem.batchTotal) : t("queueItem")
-          const next = waitingQueue(event.sessionId)[0]
+          const next = waitingQueue(event)[0]
           queueNote = t("queueProgress", progress, isError ? t("executionFailed") : t("completed"), durationText(activeQueueItem.dispatchedAt, Date.parse(event.createdAt || Date.now())), waiting, next ? t("nextTask", compact(next.text, 180)) : "")
           if (isError) queueNote += t("queueAutoPaused")
-        } else if (event.sessionId && state.queueStartOnIdle[event.sessionId] && waiting) {
+        } else if (eventKey && state.queueStartOnIdle[eventKey] && waiting) {
           queueNote += t("waitingWillStart", waiting)
         }
         const icon = isError ? "❌" : "✅"
         const stats = event.summary ? t("changeStats", event.summary.files || 0, event.summary.additions || 0, event.summary.deletions || 0) : ""
         const detail = isError ? t("error", event.error || t("unknownError")) : event.excerpt ? t("latestReply", event.excerpt) : ""
-        const text = compact(t("completion", icon, isError ? t("executionFailed") : t("taskCompleted"), event.title, event.directory, stats, queueNote, detail))
+        const text = compact(t("completionAgent", icon, backendText(event.backend || "opencode"), isError ? t("executionFailed") : t("taskCompleted"), event.title, event.directory, stats, queueNote, detail))
         try {
           await send(text, completionButtons(event))
           if (matchesQueue) {
-            delete state.queueInFlight[event.sessionId]
+            delete state.queueInFlight[eventKey]
             if (isError) {
-              state.queuePaused[event.sessionId] = true
-              state.queueStartOnIdle[event.sessionId] = false
+              state.queuePaused[eventKey] = true
+              state.queueStartOnIdle[eventKey] = false
             }
           }
           rememberEvent(event)
           rmSync(path, { force: true })
-          const shouldStart = event.sessionId && event.type === "session.idle" && waiting && !state.queuePaused[event.sessionId]
-            && (matchesQueue || state.queueStartOnIdle[event.sessionId])
+          const shouldStart = eventKey && event.type === "session.idle" && waiting && !state.queuePaused[eventKey]
+            && (matchesQueue || state.queueStartOnIdle[eventKey])
           if (shouldStart) {
-            state.queueStartOnIdle[event.sessionId] = false
+            state.queueStartOnIdle[eventKey] = false
             saveState()
             try {
-              await dispatchNext({ id: event.sessionId, title: event.title, directory: event.directory, serverUrl: event.serverUrl })
+              await dispatchNext({ id: event.sessionId, backend: event.backend || "opencode", instanceId: event.instanceId || null, title: event.title, directory: event.directory, serverUrl: event.serverUrl })
             } catch (error) {
               recordError("queue-dispatch", error)
               await send(t("nextFailed", compact(error.message, 300))).catch(() => {})
@@ -1126,12 +1247,16 @@ async function check() {
   if (!result?.ok) throw new Error("Telegram getMe failed")
   const commandResult = await requestJson(`https://api.telegram.org/bot${token}/getMyCommands`)
   const commandNames = new Set((commandResult?.result || []).map((item) => item.command))
-  if (!["add", "batch", "find", "health", "approvals"].every((name) => commandNames.has(name))) throw new Error("Telegram command menu is incomplete")
+  if (!["home", "sessions", "opencode", "codex", "add", "batch"].every((name) => commandNames.has(name))) throw new Error("Telegram command menu is incomplete")
   const sessions = await discoverSessions()
-  console.log(`CHECK=PASS BOT=@${result.result.username} INSTANCES=${loadInstances().length} SESSIONS=${sessions.length} COMMANDS=add,batch,find,health,approvals`)
+  console.log(`CHECK=PASS BOT=@${result.result.username} INSTANCES=${loadInstances().length} SESSIONS=${sessions.length} COMMANDS=home,sessions,opencode,codex,add,batch`)
 }
 
 function selfTest() {
+  if (parseCommand("/start").name !== "home") throw new Error("parse start failed")
+  if (parseCommand("/home").name !== "home") throw new Error("parse home failed")
+  if (parseCommand("/opencode").name !== "opencode") throw new Error("parse opencode failed")
+  if (parseCommand("/codex").name !== "codex") throw new Error("parse codex failed")
   if (parseCommand("/sessions").name !== "sessions") throw new Error("parse sessions failed")
   if (parseCommand("/sessions 2").arg !== 2) throw new Error("parse sessions page failed")
   if (parseCommand("/find paper project").arg !== "paper project") throw new Error("parse find failed")

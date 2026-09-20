@@ -9,6 +9,7 @@ Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控�
 ## 已有能力
 
 - 每个 OpenCode 会话完成或失败时发送 Telegram 通知。
+- 一个聚合首页提供 OpenCode 和 Codex 两个入口；选择会话后自动进入对应 Agent 模式。
 - 分页浏览会话，并按标题或项目目录搜索。
 - 立即发送指令，或用 `/add`、`/batch` 为每个会话建立串行队列。
 - 重启后恢复队列，过滤重复事件，避免重复通知和重复执行。
@@ -25,7 +26,7 @@ Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控�
 2. 双击 `Bridge-Manager.cmd`。
 3. 选择“简体中文”或“English”。程序会记住选择，也可以在主菜单输入 `L` 随时切换。
 4. 选择“首次配置并启动”，粘贴 Bot Token，给机器人发送 `/start`，确认检测到的 Telegram 账号。
-5. 重启一次 OpenCode Desktop，然后给机器人发送 `/sessions`。
+5. 重启一次 OpenCode Desktop，然后给机器人发送 `/home` 并进入 **OpenCode**。
 
 安装程序会把适配器复制到 `%USERPROFILE%\.config\opencode\plugins\agent-task-hub.js`，把运行数据保存到 `%USERPROFILE%\.config\agent-task-hub`，并创建名为 `Agent Task Hub` 的计划任务。这些名称和旧的 OpenCode Telegram Bridge 完全分开，不会共用配置、运行状态或自启任务。
 
@@ -33,12 +34,14 @@ Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控�
 
 | 命令 | 作用 |
 |---|---|
-| `/sessions` 或 `/sessions 2` | 分页浏览会话 |
+| `/home` | 打开聚合首页 |
+| `/opencode`、`/codex` | 进入对应 Agent 模式；Codex 当前会明确提示适配器尚未连接 |
+| `/sessions` 或 `/sessions 2` | 分页浏览所有已连接 Agent 的会话 |
 | `/find 关键词` | 搜索标题和项目目录 |
 | `/use 1` | 选择当前页面中的会话 |
-| `/show` | 查看状态、改动、待办和最近回复 |
-| `/send 内容` | 立即发送一条指令 |
-| `/add 内容` | 向当前会话队列追加一条指令 |
+| `/current`、`/show` | 查看当前模式、会话、状态、改动、待办和最近回复 |
+| `/send 内容` | 向当前 Agent 会话立即发送一条指令 |
+| `/add 内容` | 向当前 Agent 会话队列追加一条指令 |
 | `/batch` | 按单独一行的 `---` 拆分多条指令 |
 | `/queue`、`/remove 2` | 查看队列或删除等待项 |
 | `/pause`、`/resume`、`/clearqueue` | 控制自动队列 |
@@ -58,6 +61,8 @@ Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控�
 ```
 
 上一条完成后才会启动下一条。机器人会先发送每条任务的完成消息，队列清空后再发送一次“全部完成”。电脑上手动启动的任务也会通知，但不会误触发无关队列。
+
+主命令菜单保持精简，高级队列、审批和诊断命令仍然可以直接输入。按钮携带操作、Agent 类型和会话身份，切换模式后不需要反复输入会话 ID。
 
 ## 管理
 

@@ -14,8 +14,9 @@ Transport + authorization
         │
         ▼
 Task controller
-  ├─ session index
-  ├─ per-session queues
+  ├─ aggregated home + agent modes
+  ├─ backend-aware session index
+  ├─ per-agent-session queues
   ├─ event deduplication
   ├─ completion notifications
   └─ approval routing
@@ -27,7 +28,7 @@ Agent adapter contract
   └─ future adapters
 ```
 
-The present controller still contains some OpenCode-oriented API calls. The adapter metadata and isolated source directory establish the migration boundary; later releases will move those calls behind a common contract without changing Telegram commands or queue semantics.
+The controller currently contains OpenCode-oriented API calls. The Telegram interaction and persistent identities are already backend-aware; later releases will move transport calls behind the common adapter contract without changing the mode, command, button, or queue semantics.
 
 ## Adapter contract
 
@@ -42,7 +43,17 @@ Each adapter is expected to provide these capabilities where the backend support
 | `events` | Publish completion and failure events |
 | `approvals` | List and answer explicit permission requests |
 
-Backend records carry a `backend` identifier. Queue identity will become `{backend, instanceId, sessionId}` before a second adapter is enabled, preventing equal session IDs from colliding.
+Backend records carry a `backend` identifier. Queue, in-flight work, recovery, deduplication, and button callbacks use a backend-aware session identity. This prevents equal OpenCode and Codex session IDs from colliding.
+
+## Telegram interaction model
+
+```text
+/home (aggregated notifications and health)
+  ├─ OpenCode entry ── select session ── OpenCode actions
+  └─ Codex entry    ── select task    ── Codex actions
+```
+
+`/sessions` is the aggregated browser. `/opencode` and `/codex` are direct entrances. Selecting an item enters its backend mode. Common commands such as `/show`, `/send`, `/add`, `/batch`, `/queue`, and `/stop` operate only on the selected session in the active mode. Notifications from every adapter remain aggregated and always show their backend. The Codex entry currently reports that the adapter is unavailable.
 
 ## Current OpenCode flow
 

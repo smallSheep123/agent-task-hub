@@ -7,6 +7,15 @@ All notable changes to this project are documented here.
 ### Added
 
 - Documented the bilingual Codex Telegram command contract, API mapping, completion semantics, queue behavior, approvals, and phased delivery plan.
+- Added an aggregated `/home`, dedicated `/opencode` and `/codex` entrances, and automatic agent-mode switching after session selection.
+- Added backend labels to session lists and completion notifications while keeping one Telegram bot and one notification stream.
+- Added backend-aware queue, in-flight, recovery, deduplication, and callback identities with migration for existing OpenCode state.
+- Added reusable agent-context and callback contract tests.
+
+### Changed
+
+- Reduced the visible Telegram command menu to the common daily operations; advanced commands remain available by direct input.
+- Made the unavailable Codex entry explicit until its adapter is implemented.
 
 ## 0.1.0 - 2026-09-20
 

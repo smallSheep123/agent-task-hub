@@ -1,53 +1,76 @@
-# Codex Telegram command design
+# Codex Telegram interaction design
 
 **English** · [简体中文](CODEX_COMMANDS.zh-CN.md) · [Home](../README.md) · [Roadmap](ROADMAP.md)
 
-> Status: this is the agreed interaction specification. The Codex adapter is not implemented yet; the current release executes OpenCode commands only.
+> Status: the dual-entry interaction and common session state are implemented. The Codex adapter is not implemented; `/codex` explicitly reports that it is unavailable.
 
-## Decision
+## Final interaction model
 
-Codex will use the existing Telegram bot, queue engine, and notification UI. Every task carries a `backend` value such as `opencode` or `codex`. Common operations stay unified, while Codex-only capabilities get explicit commands.
+Agent Task Hub uses one Telegram bot. Notifications and session browsing stay aggregated, while actions happen after entering the OpenCode or Codex mode.
 
-The official [`codex app-server` documentation](https://developers.openai.com/zh-Hans/docs/app-server) defines thread listing, creation, resume and read operations; starting, steering and interrupting turns; reviews; terminal completion events; approvals; and user-input requests. The command surface below maps to those supported operations.
+```text
+/home aggregated home
+  ├─ OpenCode ── select session ── inspect, send, queue, stop, approve
+  └─ Codex    ── select task    ── inspect, send, queue, stop, approve/answer
+```
 
-## Command surface
+Selecting a session automatically enters its backend mode. Buttons carry the backend, session, and action, so users do not need to copy IDs and a Codex action cannot target a previously selected OpenCode session. Completion and failure notifications share one chat and display `[OpenCode]` or `[Codex]`.
 
-| Command | Behavior | Codex mapping | Phase |
-|---|---|---|---|
-| `/agents` | List connected agent backends and health | Adapter state | 1 |
-| `/tasks codex 2` | Show page 2 of Codex tasks | `thread/list` | 1 |
-| `/sessions` | Compatibility alias for `/tasks` | `thread/list` | 1 |
-| `/find codex keyword` | Search Codex tasks | `thread/list searchTerm` plus local path filtering | 1 |
-| `/use 3` | Select task 3 from the current result | Local selection state | 1 |
-| `/current` | Show the selected task and backend | `thread/read` | 1 |
-| `/show` | Show status, plan, latest reply, and changes | `thread/read` and turn/item events | 1 |
-| `/new codex project_alias \| prompt` | Create a task in an approved project | `thread/start` + `turn/start` | 2 |
-| `/send prompt` | Start a new turn in an idle task | `thread/resume` + `turn/start` | 1 |
-| `/steer instruction` | Add input to the active Codex turn | `turn/steer` | 1 |
-| `/add prompt`, `/batch` | Append one or several sequential prompts | Hub queue + `turn/completed` | 1 |
-| `/queue`, `/remove 2` | Inspect or edit waiting work | Persisted Hub queue | 1 |
-| `/pause`, `/resume`, `/clearqueue` | Control automatic queue progress | Hub queue state | 1 |
-| `/stop` | Interrupt the active turn after confirmation | `turn/interrupt` | 1 |
-| `/review working` | Review uncommitted changes | `review/start: uncommittedChanges` | 2 |
-| `/review branch:main` | Review against a base branch | `review/start: baseBranch` | 2 |
-| `/approvals` | Show pending approvals again | App Server approval requests | 1 |
-| `/questions` | Show pending Codex questions again | `item/tool/requestUserInput` | 1 |
-| `/health`, `/status` | Show detailed or compact aggregated health | Hub diagnostics | 1 |
+## Main menu
 
-## Completion and queue rules
+The visible command menu contains only routine actions:
 
-The unique completion key is `{backend, threadId, turnId}`. The Hub persists that key before notifying the user or advancing a queue. `turn/completed` has `completed`, `failed`, or `interrupted` terminal states, and each state produces a distinct notification.
+| Command | Behavior |
+|---|---|
+| `/home` | Aggregated home and both agent entrances |
+| `/sessions` | Browse sessions from every connected agent |
+| `/opencode` | Enter the OpenCode session list |
+| `/codex` | Enter Codex tasks; reports unavailable until the adapter exists |
+| `/current` | Show the current mode and session |
+| `/show` | Show progress, latest output, and changes |
+| `/send prompt` | Send immediately to the selected session |
+| `/add prompt` | Append one sequential queue item |
+| `/batch` | Split queue items with a line containing `---` |
+| `/queue` | Show active and waiting work for the selected session |
+| `/help` | Show concise help |
 
-`/batch` dispatches the next item only after a terminal turn event. `/steer` modifies the active turn, so it does not create another queue item or completion count.
+`/find`, `/use`, `/remove`, `/pause`, `/resume`, `/clearqueue`, `/stop`, `/approvals`, `/health`, and `/status` remain accepted without occupying the main menu.
+
+## Common actions and Codex extensions
+
+After selecting a Codex task, the Hub reuses `/show`, `/send`, `/add`, `/batch`, `/queue`, and `/stop`. Users do not need a separate `/tasks codex 2` grammar.
+
+Codex-only features arrive later:
+
+| Command | Behavior | App Server mapping |
+|---|---|---|
+| `/steer instruction` | Add input to an active turn | `turn/steer` |
+| `/questions` | Show unanswered Codex questions | `item/tool/requestUserInput` |
+| `/new project_alias \| prompt` | Create work in an approved project | `thread/start` + `turn/start` |
+| `/review working` | Review uncommitted changes | `review/start: uncommittedChanges` |
+| `/review branch:main` | Review against a base branch | `review/start: baseBranch` |
+
+The official [`codex app-server` documentation](https://developers.openai.com/docs/app-server) defines task listing and reading, turn start and interruption, steering, reviews, completion events, approvals, and user-input requests.
+
+## Queues and notifications
+
+Persistent state uses a backend-aware identity. The current implementation separates queues, in-flight items, recovery, and event deduplication with `{backend, serverUrl/instanceId, sessionId}`. Codex terminal events will additionally deduplicate with `{backend, threadId, turnId}`.
+
+`/batch` dispatches the next item only after the previous item reaches a terminal state. Every item is reported before the queue advances, followed by one queue-complete notification. Work started on the computer is reported without advancing an unrelated queue. Restart recovery compares persisted state, current session status, pending events, and recent messages.
 
 ## Approvals and safety
 
-Telegram buttons reflect only decisions returned by App Server: allow once, allow for session, reject, or cancel. The bridge never invents broader permission choices and never exposes a permanent allow-all action.
+Buttons expose only decisions supported by the underlying agent, such as allow once, allow for session, and reject. The Hub does not invent a permanent allow-all decision. Codex user-input requests should appear as separate notifications with their allowed answers.
 
-- `/new` accepts only project aliases registered locally by the administrator.
-- No Telegram shell or arbitrary PowerShell command is exposed.
-- Codex keeps its configured sandbox and approval policy.
-- Destructive or queue-clearing actions require confirmation.
-- App Server uses local `stdio` transport by default; the Hub does not expose it to the public network.
+- `/new` accepts only locally registered project aliases.
+- Telegram never exposes a shell or arbitrary PowerShell execution.
+- Stop, queue clearing, and future archive actions require confirmation.
+- Every update must match private chat, bound Telegram user ID, and bound chat ID.
+- Codex App Server uses local `stdio`; the Hub opens no public port.
 
-Phase 1 covers listing, selection, inspection, dispatch, steering, interruption, completion notifications, approvals, questions, and queues. Phase 2 adds task creation, reviews, forks, goals, and archival controls.
+## Delivery order
+
+1. Done: aggregated home, two entrances, automatic mode selection, backend labels, backend-aware state, and legacy OpenCode state migration.
+2. Next: move existing OpenCode HTTP operations behind a common adapter interface and add reusable contract tests.
+3. Codex phase 1: list, select, inspect, send, stop, notify, approve, answer, and queue.
+4. Codex phase 2: create, steer, review, fork, goal, and archive operations.

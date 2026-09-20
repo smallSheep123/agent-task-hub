@@ -101,15 +101,17 @@ $state = [ordered]@{
     updateOffset = if ($null -eq $maxUpdate) { 0 } else { [long]$maxUpdate + 1 }
     selected = $null
     sessionMap = @()
+    viewMode = 'global'
+    activeBackend = $null
 }
 $config | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
 $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $StatePath -Encoding UTF8
 Lock-DataRoot $DataRoot
 
 $commands = if ($Language -eq 'zh-CN') { @(
-    @{ command='sessions'; description='列出最近的 OpenCode 会话' }; @{ command='find'; description='按标题或项目目录搜索会话' }; @{ command='current'; description='查看当前选择的会话' }; @{ command='show'; description='查看当前会话进展' }; @{ command='send'; description='向当前会话继续发送指令' }; @{ command='add'; description='向当前会话队列追加一条指令' }; @{ command='batch'; description='按 --- 分隔并依次执行多条指令' }; @{ command='queue'; description='查看当前会话的自动队列' }; @{ command='pause'; description='暂停当前会话的自动队列' }; @{ command='resume'; description='恢复当前会话的自动队列' }; @{ command='clearqueue'; description='清空等待中的队列任务' }; @{ command='stop'; description='停止当前会话的运行' }; @{ command='status'; description='查看服务状态' }; @{ command='health'; description='查看完整健康状态' }; @{ command='approvals'; description='查看等待处理的审批' }; @{ command='help'; description='显示帮助' }
+    @{ command='home'; description='打开聚合首页' }; @{ command='sessions'; description='查看全部 Agent 会话' }; @{ command='opencode'; description='进入 OpenCode 模式' }; @{ command='codex'; description='进入 Codex 模式' }; @{ command='current'; description='查看当前选择的会话' }; @{ command='show'; description='查看当前会话进展' }; @{ command='send'; description='向当前会话继续发送指令' }; @{ command='add'; description='向当前会话队列追加一条指令' }; @{ command='batch'; description='按 --- 分隔并依次执行多条指令' }; @{ command='queue'; description='查看当前会话的自动队列' }; @{ command='help'; description='显示帮助' }
 ) } else { @(
-    @{ command='sessions'; description='List recent OpenCode sessions' }; @{ command='find'; description='Search titles and project paths' }; @{ command='current'; description='Show the selected session' }; @{ command='show'; description='Show current session progress' }; @{ command='send'; description='Send one instruction now' }; @{ command='add'; description='Append one queued instruction' }; @{ command='batch'; description='Queue prompts separated by ---' }; @{ command='queue'; description='Show the session queue' }; @{ command='pause'; description='Pause automatic queue progress' }; @{ command='resume'; description='Resume automatic queue progress' }; @{ command='clearqueue'; description='Clear waiting queue items' }; @{ command='stop'; description='Stop the current run' }; @{ command='status'; description='Show service status' }; @{ command='health'; description='Show detailed health status' }; @{ command='approvals'; description='Show pending approvals' }; @{ command='help'; description='Show command help' }
+    @{ command='home'; description='Open the aggregated home' }; @{ command='sessions'; description='List sessions from all agents' }; @{ command='opencode'; description='Enter OpenCode mode' }; @{ command='codex'; description='Enter Codex mode' }; @{ command='current'; description='Show the selected session' }; @{ command='show'; description='Show current session progress' }; @{ command='send'; description='Send one instruction now' }; @{ command='add'; description='Append one queued instruction' }; @{ command='batch'; description='Queue prompts separated by ---' }; @{ command='queue'; description='Show the session queue' }; @{ command='help'; description='Show command help' }
 ) }
 [void](Invoke-Telegram $token 'setMyCommands' @{ commands = $commands })
 [void](Invoke-Telegram $token 'sendMessage' @{ chat_id=[string]$chat.id; text=(Get-AgentHubText 'BindingComplete') })

@@ -10,15 +10,14 @@ The planned Telegram command contract is documented in [Codex command design](CO
 - Bilingual Telegram commands, buttons, and notifications. / Telegram 命令、按钮和通知支持中英文。
 - OpenCode session discovery, control, completion events, approvals, and queues. / OpenCode 会话发现、控制、完成事件、审批和队列。
 - Isolated runtime path, plugin name, and scheduled task. / 独立的数据目录、插件名和计划任务。
+- Aggregated home, OpenCode/Codex entrances, automatic mode switching after session selection, backend labels, and backend-aware queue/recovery keys. / 聚合首页、OpenCode/Codex 双入口、选择会话后自动切换模式、后端标签，以及带后端身份的队列与恢复键。
 
-## Next: common adapter core / 下一步：通用适配层
+## Next: common adapter transport / 下一步：通用适配器传输层
 
 - Move remaining OpenCode HTTP calls behind a documented adapter interface.
-- Use `{backend, instanceId, sessionId}` as the permanent session key.
-- Make Telegram views label each task with its backend.
 - Add contract tests that can be reused by every adapter.
 
-对应中文：把控制器中剩余的 OpenCode 调用移入适配器；采用包含后端类型的会话主键；在 Telegram 明确显示任务来自哪个智能体；为所有适配器建立统一契约测试。
+对应中文：把控制器中剩余的 OpenCode 调用移入适配器，并为所有适配器建立统一契约测试。
 
 ## Codex integration / Codex 接入
 
