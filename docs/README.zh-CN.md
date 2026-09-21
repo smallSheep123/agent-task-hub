@@ -115,6 +115,8 @@ ZCode 使用已安装桌面端自带的 App Server。适配器在运行时读取
 
 语言可设为 `zh-CN`、`en-US` 或 `auto`。交互管理器会把偏好保存到 `%USERPROFILE%\.config\agent-task-hub\ui.json`。
 
+如果 Telegram 直连不稳定，可在 `config.json` 中把 `outboundProxy` 设为本机 HTTP 代理，例如 `http://127.0.0.1:7897`，然后重启服务。启动器会把它传给 Node，同时把 `127.0.0.1`、`localhost` 和 `::1` 保留在 `NO_PROXY` 中，因此各 Agent 的本机通信不会绕代理。已有的 `HTTPS_PROXY` 环境变量优先；否则仍会尝试已启用的 Windows 系统代理。
+
 ## 开发测试
 
 运行时没有 npm 依赖：

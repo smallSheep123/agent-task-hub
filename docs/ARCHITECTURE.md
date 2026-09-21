@@ -110,7 +110,7 @@ Windows Task Scheduler
   └─ starts the proxy-aware PowerShell launcher at logon
 ```
 
-The OpenCode adapter never reads the Telegram token. OpenCode registrations use an ACL-restricted local directory. Private Codex communication stays inside child-process pipes; shared Codex communication is limited to a loopback-only WebSocket owned by the current Windows user.
+The OpenCode adapter never reads the Telegram token. OpenCode registrations use an ACL-restricted local directory. Private Codex and ZCode communication stays inside child-process pipes; shared Codex communication is limited to a loopback-only WebSocket owned by the current Windows user. An optional `outboundProxy` applies to Node's external HTTP traffic, while loopback addresses are always excluded with `NO_PROXY`.
 
 OpenCode terminal events normally arrive through the plugin. The controller also polls session metadata and status every five seconds, establishing a startup baseline before emitting anything. This catches short API-started tasks and Desktop versions that omit the plugin terminal callback; the shared event fingerprinting prevents duplicate Telegram notifications.
 

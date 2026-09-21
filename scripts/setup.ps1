@@ -95,6 +95,7 @@ $config = [ordered]@{
     sessionPageSize = 6
     queueLimit = 20
     openCodePollIntervalMs = 5000
+    outboundProxy = ''
     codexTransport = 'private'
     codexWsUrl = ''
     codexPollIntervalMs = 5000

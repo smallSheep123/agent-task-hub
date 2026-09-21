@@ -3,7 +3,8 @@ param(
     [ValidateSet('run','check','self-test')]
     [string]$Mode = 'run',
     [string]$ControllerPath = '',
-    [string]$NodePath = ''
+    [string]$NodePath = '',
+    [string]$OutboundProxy = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,6 +42,27 @@ function Import-WindowsProxy {
     if ($httpsProxy) { $env:HTTPS_PROXY = $httpsProxy }
 }
 
+function Import-ConfiguredProxy {
+    if ($env:HTTPS_PROXY -or $env:https_proxy) { return }
+    $candidate = $OutboundProxy
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        $configPath = Join-Path $env:USERPROFILE '.config\agent-task-hub\config.json'
+        try {
+            $config = Get-Content -LiteralPath $configPath -Raw -ErrorAction Stop | ConvertFrom-Json
+            $candidate = [string]$config.outboundProxy
+        } catch { $candidate = '' }
+    }
+    if ([string]::IsNullOrWhiteSpace($candidate)) { return }
+    $proxy = ConvertTo-ProxyUri $candidate
+    $uri = $null
+    if (-not [Uri]::TryCreate($proxy, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -notin @('http','https')) {
+        throw 'outboundProxy must be an HTTP or HTTPS proxy URL'
+    }
+    $env:HTTP_PROXY = $proxy
+    $env:HTTPS_PROXY = $proxy
+}
+
+Import-ConfiguredProxy
 Import-WindowsProxy
 $loopback = '127.0.0.1,localhost,::1'
 $existingNoProxy = if ($env:NO_PROXY) { $env:NO_PROXY } elseif ($env:no_proxy) { $env:no_proxy } else { '' }

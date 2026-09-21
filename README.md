@@ -117,6 +117,8 @@ Use `Bridge-Manager.cmd`, or run the commands below in PowerShell:
 
 Use `zh-CN`, `en-US`, or `auto`. The interactive manager stores the preference at `%USERPROFILE%\.config\agent-task-hub\ui.json`.
 
+If Telegram is unreliable on the direct route, set `outboundProxy` in `config.json` to a local HTTP proxy such as `http://127.0.0.1:7897`, then restart the service. The launcher passes it to Node while keeping `127.0.0.1`, `localhost`, and `::1` in `NO_PROXY`, so local agent traffic stays local. An existing `HTTPS_PROXY` environment variable takes precedence; otherwise the enabled Windows system proxy remains the fallback.
+
 ## Development
 
 The runtime has no npm dependencies.
