@@ -7,6 +7,7 @@ const launcher = readFileSync(new URL("../app/run-controller.ps1", import.meta.u
 assert.match(service, /-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass/)
 assert.match(service, /if \(Get-BridgeTask\) \{ Stop-BridgeTask \}/)
 assert.match(service, /New-ScheduledTaskAction -Execute \$powershell/)
+assert.match(service, /if\(\$task\.State -ne 'Running'\)/)
 assert.match(launcher, /config\.outboundProxy/)
 assert.match(launcher, /--use-env-proxy/)
 assert.match(launcher, /NO_PROXY/)

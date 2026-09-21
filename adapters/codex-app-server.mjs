@@ -19,6 +19,12 @@ export function normalizeCodexTransport(value = "private") {
   return CODEX_TRANSPORTS.has(transport) ? transport : "private"
 }
 
+export function codexMonitorBackoffMs(intervalMs, failureCount) {
+  const base = Math.max(2000, Number(intervalMs) || 5000)
+  const failures = Math.max(0, Number(failureCount) || 0)
+  return Math.min(15 * 60 * 1000, base * (2 ** Math.min(failures, 7)))
+}
+
 function executableCandidates(command) {
   if (/[\\/]/.test(command)) return [command]
   const extensions = process.platform === "win32" ? [".exe", ".ps1", ".cmd", ""] : [""]
@@ -251,6 +257,9 @@ export class CodexAppServer extends EventEmitter {
     this.observedTurns = new Set()
     this.monitorTimer = null
     this.monitorBusy = false
+    this.monitorActive = false
+    this.monitorFailures = 0
+    this.monitorLastDiagnosticAt = 0
     this.monitorStartedAt = 0
     this.monitorInitialized = false
     this.ready = false
@@ -384,7 +393,8 @@ export class CodexAppServer extends EventEmitter {
   async stop() {
     this.stopping = true
     this.ready = false
-    if (this.monitorTimer) clearInterval(this.monitorTimer)
+    this.monitorActive = false
+    if (this.monitorTimer) clearTimeout(this.monitorTimer)
     this.monitorTimer = null
     if (!this.process && !this.socket) return
     await this.#discardConnection(new Error("Codex app-server stopped"))
@@ -552,10 +562,19 @@ export class CodexAppServer extends EventEmitter {
         const threadId = String(listed.id)
         const version = unixMilliseconds(listed.updatedAt || listed.recencyAt || listed.createdAt)
         const previous = this.threadVersions.get(threadId)
-        this.threadVersions.set(threadId, version)
-        if (previous === undefined && !this.monitorInitialized) continue
+        if (previous === undefined && !this.monitorInitialized) {
+          this.threadVersions.set(threadId, version)
+          continue
+        }
         if (previous !== undefined && version <= previous) continue
-        const thread = await this.readThread(threadId)
+        let thread
+        try {
+          thread = await this.readThread(threadId)
+        } catch (error) {
+          this.#monitorDiagnostic(`Codex monitor could not read thread ${threadId}: ${error.message}`)
+          continue
+        }
+        this.threadVersions.set(threadId, version)
         const threshold = previous === undefined ? this.monitorStartedAt : previous - 2000
         const turn = externalTerminalTurn(thread, { threshold, observedTurns: this.observedTurns })
         if (!turn) continue
@@ -567,16 +586,36 @@ export class CodexAppServer extends EventEmitter {
     }
   }
 
+  #monitorDiagnostic(message) {
+    const now = Date.now()
+    if (this.monitorLastDiagnosticAt && now - this.monitorLastDiagnosticAt < 15 * 60 * 1000) return
+    this.monitorLastDiagnosticAt = now
+    this.emit("diagnostic", message)
+  }
+
   async startMonitor({ intervalMs = 5000, limit = 100 } = {}) {
-    if (this.monitorTimer) return
+    if (this.monitorActive) return
+    this.monitorActive = true
     this.monitorStartedAt = Date.now()
-    this.monitorTimer = setInterval(() => {
-      void this.#pollExternalCompletions(limit).catch((error) => this.emit("diagnostic", "Codex monitor failed: " + error.message))
-    }, Math.max(2000, intervalMs))
-    this.monitorTimer.unref?.()
-    void this.#pollExternalCompletions(limit)
-      .catch((error) => this.emit("diagnostic", "Codex monitor baseline failed: " + error.message))
-      .finally(() => { this.monitorInitialized = true })
+    const baseInterval = Math.max(2000, Number(intervalMs) || 5000)
+    const run = async () => {
+      let delay = baseInterval
+      try {
+        await this.#pollExternalCompletions(limit)
+        this.monitorFailures = 0
+      } catch (error) {
+        this.monitorFailures += 1
+        delay = codexMonitorBackoffMs(baseInterval, this.monitorFailures)
+        this.#monitorDiagnostic(`Codex monitor delayed after ${this.monitorFailures} failure(s); retrying in ${Math.ceil(delay / 1000)}s: ${error.message}`)
+      } finally {
+        this.monitorInitialized = true
+        if (this.monitorActive && this.ready) {
+          this.monitorTimer = setTimeout(() => { void run() }, delay)
+          this.monitorTimer.unref?.()
+        }
+      }
+    }
+    void run()
   }
 
   async readThread(threadId) {

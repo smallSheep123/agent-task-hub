@@ -76,7 +76,12 @@ switch ($Action) {
         Start-Sleep -Seconds 2
         Show-Status
     }
-    'start' { if(-not (Get-BridgeTask)){throw (Get-AgentHubText 'ServiceMissing')}; Start-ScheduledTask $TaskName; Start-Sleep 1; Show-Status }
+    'start' {
+        $task = Get-BridgeTask
+        if(-not $task){throw (Get-AgentHubText 'ServiceMissing')}
+        if($task.State -ne 'Running'){Start-ScheduledTask $TaskName; Start-Sleep 1}
+        Show-Status
+    }
     'stop' { Stop-BridgeTask; Show-Status }
     'restart' { if(-not (Get-BridgeTask)){throw (Get-AgentHubText 'ServiceMissing')}; Stop-BridgeTask; Start-ScheduledTask $TaskName; Start-Sleep 2; Show-Status }
     'status' { Show-Status }

@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## 0.5.1 - 2026-09-22
+
+### Fixed
+
+- Added adaptive backoff and diagnostic throttling to the Codex completion fallback monitor when the shared App Server is busy.
+- Isolated individual `thread/read` failures so one slow conversation cannot abort the full completion scan or suppress later retries.
+- Reduced the default shared-history scan from 100 conversations every 5 seconds to 30 conversations every 60 seconds; live App Server events remain immediate.
+- Made the service start action idempotent so starting an already-running gateway does not leave a misleading Task Scheduler error result.
+
 ## 0.5.0 - 2026-09-22
 
 ### Fixed

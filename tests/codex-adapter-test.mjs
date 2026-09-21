@@ -2,11 +2,17 @@ import assert from "node:assert/strict"
 import {
   approvalOptionsForRequest,
   approvalResponseForRequest,
+  codexMonitorBackoffMs,
   codexThreadToSession,
   externalTerminalTurn,
   isUserFacingCodexThread,
   terminalEventFromNotification,
 } from "../adapters/codex-app-server.mjs"
+
+assert.equal(codexMonitorBackoffMs(5000, 0), 5000)
+assert.equal(codexMonitorBackoffMs(5000, 1), 10000)
+assert.equal(codexMonitorBackoffMs(60000, 4), 900000)
+assert.equal(codexMonitorBackoffMs(60000, 20), 900000)
 
 assert.equal(isUserFacingCodexThread({ source: "vscode", preview: "User task" }), true)
 assert.equal(isUserFacingCodexThread({ source: "appServer", preview: "Hub task" }), true)
