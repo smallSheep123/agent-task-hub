@@ -8,6 +8,8 @@ for (const language of ["zh-CN", "en-US"]) {
   assert.equal(i18n.commands().length, 11)
   assert.ok(i18n.commands().every(({ command, description }) => command && description))
   assert.match(i18n.t("help"), /\/batch/)
+  assert.match(i18n.t("help"), /\/new/)
+  assert.match(i18n.t("help"), /\/steer/)
   assert.match(i18n.t("home", "mode", "session", 1, "offline"), /Agent Task Hub/)
   assert.doesNotMatch(i18n.t("health", ...Array(11).fill("ok")), /\{\d+\}/)
 }

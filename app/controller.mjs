@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto"
 import { spawnSync } from "node:child_process"
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, isAbsolute, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { createI18n } from "./locales.mjs"
 import { decodeSessionAction, encodeSessionAction, enterAgentMode, enterGlobalMode, filterAgentSessions, initializeAgentContext, migrateSessionCollections, selectAgentSession, sessionIdentity } from "./agent-context.mjs"
@@ -162,6 +162,18 @@ export function loopbackBase(value) {
   return url.toString().replace(/\/$/, "")
 }
 
+export function telegramApiRoot(value = "https://api.telegram.org") {
+  const url = new URL(String(value || "https://api.telegram.org"))
+  const host = url.hostname.toLowerCase()
+  const official = url.protocol === "https:" && host === "api.telegram.org"
+  const local = url.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(host)
+  if (!official && !local) throw new Error("Telegram API root must be official HTTPS or a loopback test endpoint")
+  url.pathname = url.pathname.replace(/\/+$/, "")
+  url.search = ""
+  url.hash = ""
+  return url.toString().replace(/\/$/, "")
+}
+
 export function parseCommand(text) {
   const value = String(text || "").trim()
   let match
@@ -169,6 +181,8 @@ export function parseCommand(text) {
   if (/^\/home(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "home" }
   if (/^\/opencode(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "opencode" }
   if (/^\/codex(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "codex" }
+  if ((match = value.match(/^\/new(?:@[A-Za-z0-9_]+)?\s+([A-Za-z0-9._-]{1,64})\s*\|\s*([\s\S]{1,3500})$/i))) return { name: "new", arg: { alias: match[1], prompt: match[2].trim() } }
+  if (/^\/new(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(value)) return { name: "new", arg: null }
   if (/^\/help(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "help" }
   if (/^\/status(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "status" }
   if ((match = value.match(/^\/sessions(?:@[A-Za-z0-9_]+)?(?:\s+([1-9]\d{0,3}))?$/i))) return { name: "sessions", arg: Number.parseInt(match[1] || "1", 10) }
@@ -177,6 +191,7 @@ export function parseCommand(text) {
   if (/^\/current(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "current" }
   if (/^\/show(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "show" }
   if ((match = value.match(/^\/send(?:@[A-Za-z0-9_]+)?\s+([\s\S]{1,3500})$/i))) return { name: "send", arg: match[1].trim() }
+  if ((match = value.match(/^\/steer(?:@[A-Za-z0-9_]+)?\s+([\s\S]{1,3500})$/i))) return { name: "steer", arg: match[1].trim() }
   if ((match = value.match(/^\/add(?:@[A-Za-z0-9_]+)?\s+([\s\S]{1,3500})$/i))) return { name: "add", arg: match[1].trim() }
   if ((match = value.match(/^\/batch(?:@[A-Za-z0-9_]+)?\s+([\s\S]+)$/i))) return { name: "batch", arg: match[1].trim() }
   if (/^\/queue(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "queue" }
@@ -190,6 +205,17 @@ export function parseCommand(text) {
   if (/^\/questions(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "questions" }
   if ((match = value.match(/^\/answer(?:@[A-Za-z0-9_]+)?\s+([\s\S]{1,1000})$/i))) return { name: "answer", arg: match[1].trim() }
   return null
+}
+
+export function resolveCodexProject(projects, alias) {
+  if (!projects || typeof projects !== "object" || Array.isArray(projects)) return null
+  const requested = String(alias || "").toLowerCase()
+  const key = Object.keys(projects).find((item) => item.toLowerCase() === requested)
+  if (!key) return null
+  const entry = projects[key]
+  const directory = typeof entry === "string" ? entry : entry?.path
+  if (!directory || !isAbsolute(String(directory))) return null
+  return { alias: key, directory: resolve(String(directory)) }
 }
 
 export function parseBatch(value, limit = 20) {
@@ -446,7 +472,7 @@ async function getSessionView(session) {
     const turns = Array.isArray(thread?.turns) ? thread.turns : []
     const latestTurn = [...turns].reverse().find((turn) => Array.isArray(turn?.items))
     const latest = [...(latestTurn?.items || [])].reverse().find((item) => item?.type === "agentMessage" || item?.type === "exitedReviewMode")
-    const status = typeof thread?.status === "string" ? thread.status : thread?.status?.type || session.status || "idle"
+    const status = await client.status(session.id)
     return compact(t("codexSessionView", thread?.name || thread?.preview || session.title, status, thread?.cwd || session.directory, turns.length, latest?.text || latest?.review || t("noAssistantReply")))
   }
   const id = encodeURIComponent(session.id)
@@ -471,8 +497,8 @@ async function main(options = {}) {
   codexDefaultWsUrl = config.codexWsUrl || process.env.AGENT_TASK_HUB_CODEX_WS_URL || ""
   if (!config?.allowedUserId || !config?.allowedChatId || !config?.botTokenProtected) throw new Error("Incomplete Agent Task Hub configuration")
   i18n = createI18n(config.language || "en-US")
-  const botToken = decryptToken()
-  const apiBase = `https://api.telegram.org/bot${botToken}`
+  const botToken = process.env.AGENT_TASK_HUB_BOT_TOKEN || decryptToken()
+  const apiBase = `${telegramApiRoot(process.env.AGENT_TASK_HUB_TELEGRAM_API_ROOT)}/bot${botToken}`
   const botCommands = i18n.commands()
   const state = readJson(statePath, { updateOffset: 0, selected: null, sessionMap: [] })
   initializeAgentContext(state)
@@ -1408,6 +1434,43 @@ async function main(options = {}) {
     if (command.name === "home") return commandHome()
     if (command.name === "opencode") return commandAgent("opencode")
     if (command.name === "codex") return commandAgent("codex")
+    if (command.name === "new") {
+      if (!command.arg) return send(t("newUsage"))
+      const aliases = Object.keys(config.codexProjects || {})
+      const project = resolveCodexProject(config.codexProjects, command.arg.alias)
+      if (!project) return send(t("projectNotFound", command.arg.alias, aliases.length ? aliases.join(", ") : t("none")))
+      try {
+        if (!existsSync(project.directory) || !statSync(project.directory).isDirectory()) return send(t("projectUnavailable", project.alias, project.directory))
+        const client = await attachCodexAdapter()
+        const thread = await client.startThread({ cwd: project.directory, model: config.codexNewModel || null })
+        if (!thread?.id) throw new Error("Codex thread/start returned no thread id")
+        const session = {
+          id: String(thread.id),
+          backend: "codex",
+          instanceId: "codex-local",
+          title: shortLine(command.arg.prompt, 180),
+          directory: project.directory,
+          status: "busy",
+          codexStatus: { type: "active", activeFlags: [] },
+          updatedAt: Date.now(),
+          activeTurnId: null,
+        }
+        selectAgentSession(state, session)
+        state.sessionMap = [session, ...(state.sessionMap || []).filter((item) => item.id !== session.id)].slice(0, 100)
+        saveState()
+        const turn = await client.sendPrompt(session.id, command.arg.prompt)
+        await client.setThreadName(session.id, session.title).catch((error) => log("WARN", `unable to name new Codex thread ${session.id}: ${error.message}`))
+        session.activeTurnId = turn?.id || null
+        state.selected.status = "busy"
+        saveState()
+        return send(t("newStarted", project.alias, session.title, session.id, session.directory), { reply_markup: { inline_keyboard: [
+          [{ text: t("viewDetails"), callback_data: encodeSessionAction("show", session) }, { text: t("append"), callback_data: encodeSessionAction("addhelp", session) }],
+          [{ text: t("viewQueue"), callback_data: encodeSessionAction("queue", session) }, { text: t("stopTask"), callback_data: encodeSessionAction("stopask", session) }],
+        ] } })
+      } catch (error) {
+        return send(t("newFailed", compact(error.message, 300)))
+      }
+    }
     if (command.name === "status") {
       const codexStatus = codexClient?.ready && codexClient.isRunning
         ? `${t("online")} · ${t(String(codexClient.transport || "").startsWith("shared") ? "codexShared" : "codexPrivate")}`
@@ -1492,6 +1555,16 @@ async function main(options = {}) {
     if (!selected) return send(t("selectFirst"))
     if (command.name === "show") return send(await getSessionView(selected))
     if (command.name === "queue") return send(queueSummary(selected))
+    if (command.name === "steer") {
+      if ((selected.backend || "opencode") !== "codex") return send(t("steerCodexOnly"))
+      try {
+        const client = await ensureCodexClient(config.codexCommand || null)
+        await client.steer(selected.id, command.arg)
+        return send(t("steered"))
+      } catch (error) {
+        return send(t("steerFailed", compact(error.message, 300)))
+      }
+    }
     if (command.name === "add") {
       const key = migrateSessionState(selected)
       const queue = waitingQueue(selected)
@@ -2069,6 +2142,8 @@ function selfTest() {
   if (parseCommand("/home").name !== "home") throw new Error("parse home failed")
   if (parseCommand("/opencode").name !== "opencode") throw new Error("parse opencode failed")
   if (parseCommand("/codex").name !== "codex") throw new Error("parse codex failed")
+  if (parseCommand("/new hub | 检查项目").arg?.alias !== "hub" || parseCommand("/new hub | 检查项目").arg?.prompt !== "检查项目") throw new Error("parse new failed")
+  if (parseCommand("/new bad")?.name !== "new" || parseCommand("/new bad")?.arg !== null) throw new Error("parse invalid new failed")
   if (parseCommand("/sessions").name !== "sessions") throw new Error("parse sessions failed")
   if (parseCommand("/sessions 2").arg !== 2) throw new Error("parse sessions page failed")
   if (parseCommand("/find paper project").arg !== "paper project") throw new Error("parse find failed")
@@ -2077,6 +2152,7 @@ function selfTest() {
   if (parseCommand("/questions").name !== "questions") throw new Error("parse questions failed")
   if (parseCommand("/answer continue").arg !== "continue") throw new Error("parse answer failed")
   if (parseCommand("/send 继续运行测试").arg !== "继续运行测试") throw new Error("parse send failed")
+  if (parseCommand("/steer 优先修复失败测试").arg !== "优先修复失败测试") throw new Error("parse steer failed")
   if (parseCommand("/add 先运行测试").name !== "add") throw new Error("parse add failed")
   if (parseCommand("/batch 先运行测试\n---\n再写文档").name !== "batch") throw new Error("parse batch failed")
   if (parseBatch("先运行测试\n---\n再写文档").length !== 2) throw new Error("split batch failed")
@@ -2094,11 +2170,19 @@ function selfTest() {
   if (parseCommand("/remove 2").arg !== 2) throw new Error("parse remove failed")
   if (parseCommand("hello") !== null) throw new Error("free text must not execute")
   if (loopbackBase("http://127.0.0.1:4096/path") !== "http://127.0.0.1:4096") throw new Error("loopback normalize failed")
+  if (telegramApiRoot() !== "https://api.telegram.org") throw new Error("official Telegram API root failed")
+  if (telegramApiRoot("http://127.0.0.1:8080/mock/") !== "http://127.0.0.1:8080/mock") throw new Error("loopback Telegram API root failed")
   if (permissionToken("http://127.0.0.1:4096", "request-1").length !== 16) throw new Error("permission token invalid")
   if (permissionToken("http://127.0.0.1:4096/path", "request-1") !== permissionToken("http://127.0.0.1:4096", "request-1")) throw new Error("permission token normalization failed")
   let rejected = false
   try { loopbackBase("https://example.com") } catch { rejected = true }
   if (!rejected) throw new Error("remote server must be rejected")
+  rejected = false
+  try { telegramApiRoot("https://example.com") } catch { rejected = true }
+  if (!rejected) throw new Error("untrusted Telegram API root must be rejected")
+  const project = resolveCodexProject({ Hub: "C:\\work\\hub" }, "hub")
+  if (project?.alias !== "Hub" || project.directory !== resolve("C:\\work\\hub")) throw new Error("Codex project alias resolution failed")
+  if (resolveCodexProject({ bad: "relative/path" }, "bad") !== null) throw new Error("relative Codex project path must be rejected")
   console.log("SELF_TEST=PASS")
 }
 

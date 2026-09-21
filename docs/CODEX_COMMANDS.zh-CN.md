@@ -40,14 +40,14 @@
 
 选择 Codex 任务后，优先复用 `/show`、`/send`、`/add`、`/batch`、`/queue` 和 `/stop`，不再要求用户学习 `/tasks codex 2` 这类额外语法。
 
-Codex 提问已经实现；其他独有能力放在后续阶段：
+Codex 提问、按项目新建会话和运行中补充要求已经实现；审查命令仍在后续阶段：
 
 | 命令 | 作用 | App Server 映射 |
 |---|---|---|
-| `/steer 内容` | 给正在运行的轮次补充要求 | `turn/steer` |
+| `/steer 内容` | 给正在运行的轮次补充要求（已实现） | `turn/steer` |
 | `/questions` | 重新显示等待回答的问题（已实现） | `item/tool/requestUserInput` |
 | `/answer 内容` | 回答当前任务下一条自由文本问题（已实现） | `item/tool/requestUserInput` response |
-| `/new 项目别名 \| 指令` | 在预先登记的项目中建立新任务 | `thread/start` + `turn/start` |
+| `/new 项目别名 \| 指令` | 在预先登记的项目中建立新任务（已实现） | `thread/start` + `turn/start` |
 | `/review working` | 审查未提交改动 | `review/start: uncommittedChanges` |
 | `/review branch:main` | 与指定基础分支比较 | `review/start: baseBranch` |
 
@@ -74,6 +74,6 @@ Codex 提问已经实现；其他独有能力放在后续阶段：
 ## 实现顺序
 
 1. 已完成：聚合首页、双入口、模式切换、后端标签、状态隔离、兼容旧 OpenCode 状态。
-2. 已完成：Codex 任务列表、选择、查看、发送、停止、完成提醒、外部任务完成轮询、审批、提问、队列和断电恢复。
+2. 已完成：Codex 任务列表、选择、新建、查看、发送、运行中补充、停止、完成提醒、外部任务完成轮询、审批、提问、队列和断电恢复。
 3. 下一步：把现有 OpenCode HTTP 操作收进统一适配器接口，并增加更多契约测试。
-4. 后续：新建任务、运行中补充、审查、派生、目标和归档。
+4. 后续：审查、派生、目标和面向用户的归档操作。

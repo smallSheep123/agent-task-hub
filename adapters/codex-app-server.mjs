@@ -6,6 +6,7 @@ import { delimiter, dirname, extname, join } from "node:path"
 import readline from "node:readline"
 
 const CODEX_INSTANCE_ID = "codex-local"
+const CODEX_SOURCE_KINDS = ["cli", "vscode", "exec", "appServer", "subAgent", "subAgentReview", "subAgentCompact", "subAgentThreadSpawn", "subAgentOther", "unknown"]
 const CODEX_TRANSPORTS = new Set(["private", "shared", "auto"])
 
 export function normalizeCodexTransport(value = "private") {
@@ -226,6 +227,7 @@ export class CodexAppServer extends EventEmitter {
     this.nextId = 1
     this.pending = new Map()
     this.threads = new Map()
+    this.loadedThreads = new Set()
     this.activeTurns = new Map()
     this.latestMessages = new Map()
     this.diffs = new Map()
@@ -297,7 +299,7 @@ export class CodexAppServer extends EventEmitter {
       this.emit("exit", { code: event.code, signal: null, detail })
     })
     this.serverInfo = await this.request("initialize", {
-      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.3.3" },
+      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.4.0" },
       capabilities: { experimentalApi: true },
     }, Math.min(this.requestTimeoutMs, this.sharedConnectTimeoutMs))
     this.notify("initialized", {})
@@ -328,7 +330,7 @@ export class CodexAppServer extends EventEmitter {
     this.lines = readline.createInterface({ input: child.stdout })
     this.lines.on("line", (line) => this.#receive(line))
     this.serverInfo = await this.request("initialize", {
-      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.3.3" },
+      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.4.0" },
       capabilities: { experimentalApi: true },
     }, transport === "shared" ? Math.min(this.requestTimeoutMs, this.sharedConnectTimeoutMs) : this.requestTimeoutMs)
     this.notify("initialized", {})
@@ -374,6 +376,7 @@ export class CodexAppServer extends EventEmitter {
 
   #fail(error) {
     this.ready = false
+    this.loadedThreads.clear()
     for (const { reject, timer } of this.pending.values()) {
       clearTimeout(timer)
       reject(error)
@@ -468,6 +471,11 @@ export class CodexAppServer extends EventEmitter {
       this.latestMessages.delete(threadId)
       this.diffs.delete(threadId)
       this.emit("terminal", event)
+    } else if (method === "thread/name/updated" && params.threadId) {
+      const previous = this.threads.get(String(params.threadId)) || { id: String(params.threadId), cwd: "", turns: [] }
+      this.#rememberThread({ ...previous, name: String(params.name || "") })
+    } else if ((method === "thread/closed" || method === "thread/archived" || method === "thread/deleted") && params.threadId) {
+      this.loadedThreads.delete(String(params.threadId))
     }
     this.emit("notification", { method, params })
   }
@@ -482,6 +490,7 @@ export class CodexAppServer extends EventEmitter {
         archived: false,
         sortKey: "recency_at",
         sortDirection: "desc",
+        sourceKinds: CODEX_SOURCE_KINDS,
       })
       for (const thread of response?.data || []) {
         this.#rememberThread(thread)
@@ -496,7 +505,7 @@ export class CodexAppServer extends EventEmitter {
     if (this.monitorBusy || !this.ready) return
     this.monitorBusy = true
     try {
-      const response = await this.request("thread/list", { limit, archived: false, sortKey: "recency_at", sortDirection: "desc" })
+      const response = await this.request("thread/list", { limit, archived: false, sortKey: "recency_at", sortDirection: "desc", sourceKinds: CODEX_SOURCE_KINDS })
       for (const listed of response?.data || []) {
         this.#rememberThread(listed)
         const threadId = String(listed.id)
@@ -529,17 +538,47 @@ export class CodexAppServer extends EventEmitter {
   }
 
   async readThread(threadId) {
-    const response = await this.request("thread/read", { threadId: String(threadId), includeTurns: true })
-    return this.#rememberThread(response?.thread)
+    let lastError = null
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        const response = await this.request("thread/read", { threadId: String(threadId), includeTurns: true })
+        return this.#rememberThread(response?.thread)
+      } catch (error) {
+        lastError = error
+        if (!/(no rollout found|thread-store internal error|failed to read session)/i.test(String(error?.message || error))) throw error
+        if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+    }
+    const cached = this.threads.get(String(threadId))
+    if (cached && this.loadedThreads.has(String(threadId))) return cached
+    throw lastError
+  }
+
+  async startThread({ cwd, model = null } = {}) {
+    const params = { serviceName: "agent_task_hub" }
+    if (cwd) params.cwd = String(cwd)
+    if (model) params.model = String(model)
+    const response = await this.request("thread/start", params, 30000)
+    const thread = this.#rememberThread(response?.thread)
+    if (thread?.id) this.loadedThreads.add(String(thread.id))
+    return thread
+  }
+
+  async setThreadName(threadId, name) {
+    await this.request("thread/name/set", { threadId: String(threadId), name: String(name) })
+    const previous = this.threads.get(String(threadId)) || { id: String(threadId), cwd: "", turns: [] }
+    this.#rememberThread({ ...previous, name: String(name) })
   }
 
   async resumeThread(threadId) {
     const response = await this.request("thread/resume", { threadId: String(threadId) })
-    return this.#rememberThread(response?.thread)
+    const thread = this.#rememberThread(response?.thread)
+    if (thread?.id) this.loadedThreads.add(String(thread.id))
+    return thread
   }
 
   async sendPrompt(threadId, text) {
-    await this.resumeThread(threadId)
+    if (!this.loadedThreads.has(String(threadId))) await this.resumeThread(threadId)
     const response = await this.request("turn/start", {
       threadId: String(threadId),
       input: [{ type: "text", text: String(text) }],
@@ -548,17 +587,54 @@ export class CodexAppServer extends EventEmitter {
     return response?.turn
   }
 
-  async interrupt(threadId) {
+  async steer(threadId, text) {
     let turnId = this.activeTurns.get(String(threadId))
     if (!turnId) {
       const thread = await this.readThread(threadId)
       turnId = [...(thread?.turns || [])].reverse().find((turn) => turn?.status === "inProgress")?.id
     }
     if (!turnId) throw new Error("Codex task has no active turn")
-    await this.request("turn/interrupt", { threadId: String(threadId), turnId: String(turnId) })
+    const response = await this.request("turn/steer", {
+      threadId: String(threadId),
+      input: [{ type: "text", text: String(text) }],
+      expectedTurnId: String(turnId),
+    })
+    return response?.turnId || turnId
+  }
+
+  async interrupt(threadId) {
+    let lastError = null
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      let turnId = this.activeTurns.get(String(threadId))
+      if (!turnId) {
+        const thread = await this.readThread(threadId)
+        turnId = [...(thread?.turns || [])].reverse().find((turn) => turn?.status === "inProgress")?.id
+      }
+      if (turnId) {
+        try {
+          await this.request("turn/interrupt", { threadId: String(threadId), turnId: String(turnId) })
+          return
+        } catch (error) {
+          lastError = error
+          if (!/no active turn/i.test(String(error?.message || error))) throw error
+        }
+      }
+      if (attempt < 9) await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    throw lastError || new Error("Codex task has no active turn")
+  }
+
+  async archiveThread(threadId) {
+    await this.request("thread/archive", { threadId: String(threadId) })
+    this.threads.delete(String(threadId))
+    this.activeTurns.delete(String(threadId))
+    this.loadedThreads.delete(String(threadId))
   }
 
   async status(threadId) {
+    if (this.activeTurns.has(String(threadId))) return "busy"
+    const cached = this.threads.get(String(threadId))
+    if (statusText(cached?.status) === "busy") return "busy"
     const thread = await this.readThread(threadId)
     return statusText(thread?.status)
   }

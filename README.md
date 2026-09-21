@@ -39,11 +39,13 @@ Setup installs the adapter as `%USERPROFILE%\.config\opencode\plugins\agent-task
 |---|---|
 | `/home` | Open the aggregated agent home |
 | `/opencode`, `/codex` | Enter an agent-specific session list |
+| `/new project_alias \| prompt` | Create and start a Codex session in an approved project |
 | `/sessions` or `/sessions 2` | Browse sessions from all connected agents |
 | `/find keyword` | Search session titles and project paths |
 | `/use 1` | Select a session from the current page |
 | `/current`, `/show` | Show the current mode, selected session, status, changes, todos, and latest reply |
 | `/send prompt` | Send one prompt immediately in the selected agent session |
+| `/steer prompt` | Add instructions to the active Codex turn |
 | `/add prompt` | Append one prompt to the selected agent session queue |
 | `/batch` | Queue prompts separated by a line containing `---` |
 | `/queue`, `/remove 2` | Inspect or edit waiting queue items |
@@ -65,6 +67,8 @@ Write a short maintenance note
 ```
 
 Each item starts after the preceding completion event. The bot reports every completion before dispatching the next item, then sends a final message when the queue is empty. Tasks started manually on the computer are reported without accidentally advancing an unrelated queue.
+
+`/new` accepts only aliases registered in `%USERPROFILE%\.config\agent-task-hub\config.json`. Example: `"codexProjects": { "hub": "D:\\AIGC\\agent-task-hub" }`.
 
 OpenCode questions are discovered independently of the selected Telegram mode. Single-choice options continue immediately, multi-choice questions have an explicit submit button, and free-text choices use `/answer text`.
 
@@ -121,6 +125,14 @@ npm run check
 npm run stress
 npm run stress:codex
 npm run smoke:codex
+```
+
+Model-backed live suites are opt-in because they create real Codex turns. Both archive their temporary threads:
+
+```powershell
+$env:AGENT_TASK_HUB_LIVE_E2E = '1'
+npm run e2e:codex
+npm run e2e:hub
 ```
 
 See [Architecture](docs/ARCHITECTURE.md) for adapter boundaries, [Codex commands](docs/CODEX_COMMANDS.md) for the implemented Telegram interface, and [Roadmap](docs/ROADMAP.md) for later features.

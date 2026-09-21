@@ -37,11 +37,13 @@ Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控�
 |---|---|
 | `/home` | 打开聚合首页 |
 | `/opencode`、`/codex` | 进入对应 Agent 的会话列表 |
+| `/new 项目别名 \| 指令` | 在已登记项目中新建并启动 Codex 会话 |
 | `/sessions` 或 `/sessions 2` | 分页浏览所有已连接 Agent 的会话 |
 | `/find 关键词` | 搜索标题和项目目录 |
 | `/use 1` | 选择当前页面中的会话 |
 | `/current`、`/show` | 查看当前模式、会话、状态、改动、待办和最近回复 |
 | `/send 内容` | 向当前 Agent 会话立即发送一条指令 |
+| `/steer 内容` | 给正在运行的 Codex 轮次补充要求 |
 | `/add 内容` | 向当前 Agent 会话队列追加一条指令 |
 | `/batch` | 按单独一行的 `---` 拆分多条指令 |
 | `/queue`、`/remove 2` | 查看队列或删除等待项 |
@@ -63,6 +65,8 @@ Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控�
 ```
 
 上一条完成后才会启动下一条。机器人会先发送每条任务的完成消息，队列清空后再发送一次“全部完成”。电脑上手动启动的任务也会通知，但不会误触发无关队列。
+
+`/new` 只接受 `%USERPROFILE%\.config\agent-task-hub\config.json` 中登记的别名，例如：`"codexProjects": { "hub": "D:\\AIGC\\agent-task-hub" }`。
 
 主命令菜单保持精简，高级队列、审批和诊断命令仍然可以直接输入。按钮携带操作、Agent 类型和会话身份，切换模式后不需要反复输入会话 ID。
 
@@ -119,6 +123,14 @@ npm run check
 npm run stress
 npm run stress:codex
 npm run smoke:codex
+```
+
+真实 E2E 会创建并运行 Codex 测试轮次，因此需要显式启用；两个脚本结束时都会归档临时会话：
+
+```powershell
+$env:AGENT_TASK_HUB_LIVE_E2E = '1'
+npm run e2e:codex
+npm run e2e:hub
 ```
 
 适配器边界见[架构说明](ARCHITECTURE.md)，手机端正式命令见[Codex 交互说明](CODEX_COMMANDS.zh-CN.md)，后续功能见[开发路线](ROADMAP.md)。

@@ -6,6 +6,11 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- Added `/new project_alias | prompt` for safe Codex task creation from administrator-registered local projects.
+- Added `/steer prompt` for appending instructions to an active Codex turn.
+- Added a gated, model-backed Codex live E2E suite covering create, first turn, follow-up context, steer, interrupt, read, list, and archive cleanup.
+- Added an isolated full-Hub live E2E suite that feeds authorized Telegram updates through a loopback mock API and verifies `/new`, `/add`, `/batch`, `/queue`, `/current`, `/show`, `/sessions`, four sequential completions, queue cleanup, and thread archival against the real shared Codex server.
+- Included `appServer` source threads in Codex discovery and completion monitoring.
 - Documented the bilingual Codex Telegram command contract, API mapping, completion semantics, queue behavior, approvals, and phased delivery plan.
 - Added an aggregated `/home`, dedicated `/opencode` and `/codex` entrances, and automatic agent-mode switching after session selection.
 - Added backend labels to session lists and completion notifications while keeping one Telegram bot and one notification stream.
@@ -29,6 +34,8 @@ All notable changes to this project are documented here.
 
 ### Changed
 
+- Avoided a premature `thread/resume` after `thread/start`, retried immediate interrupts during the App Server activation window, and tolerated transient thread-store reads with live cached state.
+- Assigned names to Hub-created Codex threads so completion and queue notifications retain their task title.
 - Reduced the visible Telegram command menu to the common daily operations; advanced commands remain available by direct input.
 - Activated the Codex entry when app-server is available and retained a clear connection error when it is not.
 - Updated the package version to 0.2.12.

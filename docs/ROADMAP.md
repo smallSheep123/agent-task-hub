@@ -23,14 +23,12 @@ The planned Telegram command contract is documented in [Codex command design](CO
 
 ## Codex additions / Codex 后续能力
 
-The core Codex adapter is available. Later additions may provide:
+The core Codex adapter is available. Project-alias task creation and active-turn steering are implemented. Later additions may provide:
 
-- creating tasks from administrator-approved project aliases;
-- steering an active turn;
 - review, fork, goal, archive, and richer diff actions;
 - shared official Codex App Server support over a loopback WebSocket or managed control socket (implemented in 0.3).
 
-Codex 核心适配器已经可用，0.3 版本已经加入基于本机回环 WebSocket 或托管控制套接字的官方共享 App Server。后续可加入基于管理员项目别名的新建任务、运行中补充要求、审查、派生、目标和归档。
+Codex 核心适配器已经可用，0.3 版本加入共享 App Server，0.4 版本加入基于管理员项目别名的新建任务与运行中补充要求。后续可加入审查、派生、目标和归档。
 
 ## Later / 后续
 

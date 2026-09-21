@@ -99,6 +99,7 @@ $config = [ordered]@{
     codexWsUrl = ''
     codexPollIntervalMs = 5000
     codexMonitorLimit = 100
+    codexProjects = [ordered]@{}
     configuredAt = (Get-Date).ToString('o')
 }
 $maxUpdate = ($updates | Measure-Object -Property update_id -Maximum).Maximum

@@ -107,8 +107,16 @@ class FakeWebSocket {
 
   send(serialized) {
     const request = JSON.parse(serialized)
-    if (request.method === "initialize" && request.id !== undefined) queueMicrotask(() => {
-      this.emit("message", { data: JSON.stringify({ id: request.id, result: { serverInfo: { name: "fake-ws" } } }) })
+    if (request.id === undefined) return
+    const result = request.method === "initialize" ? { serverInfo: { name: "fake-ws" } }
+      : request.method === "thread/start" ? { thread: { id: "thr_live", cwd: request.params.cwd, turns: [] } }
+        : request.method === "thread/resume" ? { thread: { id: request.params.threadId, turns: [] } }
+          : request.method === "thread/read" ? { thread: { id: request.params.threadId, turns: [{ id: "turn_live", status: "inProgress" }] } }
+            : request.method === "turn/start" ? { turn: { id: "turn_live", status: "inProgress", items: [] } }
+              : request.method === "turn/steer" ? { turnId: request.params.expectedTurnId }
+                : {}
+    queueMicrotask(() => {
+      this.emit("message", { data: JSON.stringify({ id: request.id, result }) })
     })
   }
 
@@ -128,6 +136,15 @@ const websocketClient = new CodexAppServer({
 await websocketClient.start()
 assert.equal(websocketClient.transport, "shared-websocket")
 assert.equal(websocketClient.ready, true)
+const started = await websocketClient.startThread({ cwd: "C:\\work" })
+assert.equal(started.id, "thr_live")
+await websocketClient.setThreadName(started.id, "Live test")
+const turn = await websocketClient.sendPrompt(started.id, "first")
+assert.equal(turn.id, "turn_live")
+assert.equal(await websocketClient.status(started.id), "busy")
+assert.equal(await websocketClient.steer(started.id, "more"), "turn_live")
+await websocketClient.interrupt(started.id)
+await websocketClient.archiveThread(started.id)
 await websocketClient.stop()
 assert.equal(websocketClient.ready, false)
 
