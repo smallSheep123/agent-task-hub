@@ -111,7 +111,7 @@ class FakeWebSocket {
     if (request.method === "thread/list") return
     const result = request.method === "initialize" ? { serverInfo: { name: "fake-ws" } }
       : request.method === "thread/start" ? { thread: { id: "thr_live", cwd: request.params.cwd, turns: [] } }
-        : request.method === "thread/resume" ? { thread: { id: request.params.threadId, turns: [] } }
+        : request.method === "thread/resume" ? { thread: { id: request.params.threadId, turns: request.params.threadId === "thr_busy" ? [{ id: "turn_existing", status: "inProgress" }] : [] } }
           : request.method === "thread/read" ? { thread: { id: request.params.threadId, turns: [{ id: "turn_live", status: "inProgress" }] } }
             : request.method === "turn/start" ? { turn: { id: "turn_live", status: "inProgress", items: [] } }
               : request.method === "turn/steer" ? { turnId: request.params.expectedTurnId }
@@ -139,6 +139,11 @@ const websocketClient = new CodexAppServer({
 await websocketClient.start()
 assert.equal(websocketClient.transport, "shared-websocket")
 assert.equal(websocketClient.ready, true)
+await websocketClient.resumeThread("thr_busy")
+await assert.rejects(
+  websocketClient.sendPrompt("thr_busy", "must not merge after restart"),
+  (error) => error?.code === "CODEX_TURN_ACTIVE",
+)
 let internalTerminalEvents = 0
 websocketClient.on("terminal", () => { internalTerminalEvents += 1 })
 fakeWebSocket.emit("message", { data: JSON.stringify({ method: "thread/status/changed", params: { threadId: "guardian_1", thread: { id: "guardian_1", source: { subAgent: { other: "guardian" } }, preview: "Internal approval" }, status: { type: "active" } } }) })
@@ -148,12 +153,15 @@ assert.equal(internalTerminalEvents, 0)
 const started = await websocketClient.startThread({ cwd: "C:\\work" })
 assert.equal(started.id, "thr_live")
 await websocketClient.setThreadName(started.id, "Live test")
-fakeWebSocket.emit("message", { data: JSON.stringify({ method: "thread/status/changed", params: { threadId: started.id, thread: { id: started.id, name: "Codex task" }, status: { type: "active" } } }) })
 fakeWebSocket.emit("message", { data: JSON.stringify({ method: "thread/name/updated", params: { threadId: started.id, name: "Codex task" } }) })
 assert.equal(websocketClient.threads.get(started.id).name, "Live test")
 const turn = await websocketClient.sendPrompt(started.id, "first")
 assert.equal(turn.id, "turn_live")
 assert.equal(await websocketClient.status(started.id), "busy")
+await assert.rejects(
+  websocketClient.sendPrompt(started.id, "must wait for a visible turn"),
+  (error) => error?.code === "CODEX_TURN_ACTIVE",
+)
 assert.equal(await websocketClient.steer(started.id, "more"), "turn_live")
 const monitorStartedAt = Date.now()
 await websocketClient.startMonitor({ intervalMs: 2000, limit: 20 })

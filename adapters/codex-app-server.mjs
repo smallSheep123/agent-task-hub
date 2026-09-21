@@ -94,6 +94,12 @@ function statusText(status) {
   return "idle"
 }
 
+function activeTurnError(threadId) {
+  const error = new Error(`Codex task ${threadId} already has an active turn; wait for completion or use /steer`)
+  error.code = "CODEX_TURN_ACTIVE"
+  return error
+}
+
 function unixMilliseconds(value) {
   let number = Number(value || 0)
   if (number > 0 && number < 1e12) number *= 1000
@@ -484,6 +490,14 @@ export class CodexAppServer extends EventEmitter {
     return remembered
   }
 
+  #syncActiveTurn(thread) {
+    if (!thread?.id || !Array.isArray(thread.turns)) return
+    const threadId = String(thread.id)
+    const activeTurn = [...thread.turns].reverse().find((turn) => turn?.status === "inProgress")
+    if (activeTurn?.id) this.activeTurns.set(threadId, String(activeTurn.id))
+    else this.activeTurns.delete(threadId)
+  }
+
   async #emitTerminal(params) {
     const threadId = String(params.threadId || "")
     let thread = this.threads.get(threadId)
@@ -504,7 +518,10 @@ export class CodexAppServer extends EventEmitter {
       const previous = this.threads.get(String(params.threadId)) || { id: String(params.threadId), cwd: "", turns: [] }
       this.#rememberThread({ ...previous, status: params.status })
     } else if (method === "turn/started" && params.threadId && params.turn?.id) {
-      this.activeTurns.set(String(params.threadId), String(params.turn.id))
+      const threadId = String(params.threadId)
+      this.activeTurns.set(threadId, String(params.turn.id))
+      const previous = this.threads.get(threadId)
+      if (previous) this.threads.set(threadId, { ...previous, status: { type: "active" } })
     } else if (method === "item/completed" && params.threadId && params.item?.type === "agentMessage") {
       this.latestMessages.set(String(params.threadId), String(params.item.text || ""))
     } else if (method === "turn/diff/updated" && params.threadId) {
@@ -512,6 +529,8 @@ export class CodexAppServer extends EventEmitter {
     } else if (method === "turn/completed" && params.threadId) {
       const threadId = String(params.threadId)
       this.activeTurns.delete(threadId)
+      const previous = this.threads.get(threadId)
+      if (previous) this.threads.set(threadId, { ...previous, status: { type: "idle" } })
       if (params.turn?.id) this.observedTurns.add(String(params.turn.id))
       void this.#emitTerminal(params).catch((error) => this.emit("diagnostic", "Codex terminal classification failed: " + error.message))
     } else if (method === "thread/name/updated" && params.threadId) {
@@ -623,7 +642,9 @@ export class CodexAppServer extends EventEmitter {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       try {
         const response = await this.request("thread/read", { threadId: String(threadId), includeTurns: true })
-        return this.#rememberThread(response?.thread)
+        const thread = this.#rememberThread(response?.thread)
+        this.#syncActiveTurn(thread)
+        return thread
       } catch (error) {
         lastError = error
         if (!/(no rollout found|thread-store internal error|failed to read session)/i.test(String(error?.message || error))) throw error
@@ -641,6 +662,7 @@ export class CodexAppServer extends EventEmitter {
     if (model) params.model = String(model)
     const response = await this.request("thread/start", params, 30000)
     const thread = this.#rememberThread(response?.thread)
+    this.#syncActiveTurn(thread)
     if (thread?.id) this.loadedThreads.add(String(thread.id))
     return thread
   }
@@ -655,17 +677,21 @@ export class CodexAppServer extends EventEmitter {
   async resumeThread(threadId) {
     const response = await this.request("thread/resume", { threadId: String(threadId) })
     const thread = this.#rememberThread(response?.thread)
+    this.#syncActiveTurn(thread)
     if (thread?.id) this.loadedThreads.add(String(thread.id))
     return thread
   }
 
   async sendPrompt(threadId, text) {
-    if (!this.loadedThreads.has(String(threadId))) await this.resumeThread(threadId)
+    const id = String(threadId)
+    if (this.activeTurns.has(id)) throw activeTurnError(id)
+    if (!this.loadedThreads.has(id)) await this.resumeThread(id)
+    if (this.activeTurns.has(id)) throw activeTurnError(id)
     const response = await this.request("turn/start", {
-      threadId: String(threadId),
+      threadId: id,
       input: [{ type: "text", text: String(text) }],
     }, 30000)
-    if (response?.turn?.id) this.activeTurns.set(String(threadId), String(response.turn.id))
+    if (response?.turn?.id) this.activeTurns.set(id, String(response.turn.id))
     return response?.turn
   }
 

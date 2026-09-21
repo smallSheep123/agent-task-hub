@@ -1328,6 +1328,20 @@ async function main(options = {}) {
     }
   }
 
+  async function queueVisibleCodexTurn(session, text, status = "busy") {
+    const key = migrateSessionState(session)
+    const queue = waitingQueue(session)
+    const limit = Number(config.queueLimit || 20)
+    const occupied = queue.length + (state.queueInFlight[key] ? 1 : 0)
+    if (occupied >= limit) return send(t("queueFull", limit))
+    const [item] = makeQueueItems([text])
+    item.source = "send"
+    queue.push(item)
+    state.queueStartOnIdle[key] = true
+    saveState()
+    return send(t("sendQueuedVisible", status, queue.length))
+  }
+
   function queueSummary(session) {
     const key = migrateSessionState(session)
     const queue = waitingQueue(session)
@@ -1879,8 +1893,20 @@ async function main(options = {}) {
     }
     if (command.name === "send") {
       if ((selected.backend || "opencode") === "codex") {
+        const key = migrateSessionState(selected)
+        const status = await currentSessionStatus(selected)
+        if (status !== "idle" || state.queueInFlight[key]) {
+          return queueVisibleCodexTurn(selected, command.arg, status)
+        }
         const client = await ensureCodexClient(config.codexCommand || null)
-        await client.sendPrompt(selected.id, command.arg)
+        try {
+          await client.sendPrompt(selected.id, command.arg)
+        } catch (error) {
+          if (error?.code === "CODEX_TURN_ACTIVE" || /already has an active (?:turn|writer)/i.test(String(error?.message || error))) {
+            return queueVisibleCodexTurn(selected, command.arg, "busy")
+          }
+          throw error
+        }
       } else if (selected.backend === "zcode") {
         const client = await ensureZCodeClient(config.zcodeBundle || null)
         await client.sendPrompt(selected.id, command.arg)

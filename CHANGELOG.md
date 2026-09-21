@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## 0.5.2 - 2026-09-22
+
+### Fixed
+
+- Made Codex `/send` create a distinct visible turn so its prompt appears as a separate user-message bubble in Codex Desktop.
+- Queued `/send` automatically while a Codex turn is active; `/steer` remains the explicit immediate in-turn update command.
+- Rejected accidental second `turn/start` calls for active Codex tasks to prevent prompts from being merged into the current turn.
+
 ## 0.5.1 - 2026-09-22
 
 ### Fixed

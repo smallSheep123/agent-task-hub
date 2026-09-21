@@ -44,8 +44,8 @@ Setup installs the adapter as `%USERPROFILE%\.config\opencode\plugins\agent-task
 | `/find keyword` | Search session titles and project paths |
 | `/use 1` | Select a session from the current page |
 | `/current`, `/show` | Show the current mode, selected session, status, changes, todos, and latest reply |
-| `/send prompt` | Send one prompt immediately in the selected agent session |
-| `/steer prompt` | Add instructions to the active Codex turn |
+| `/send prompt` | Send a separate visible turn; wait automatically while Codex is busy |
+| `/steer prompt` | Update the active Codex turn immediately without creating a separate user bubble |
 | `/add prompt` | Append one prompt to the selected agent session queue |
 | `/batch` | Queue prompts separated by a line containing `---` |
 | `/queue`, `/remove 2` | Inspect or edit waiting queue items |

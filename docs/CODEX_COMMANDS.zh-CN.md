@@ -28,7 +28,7 @@
 | `/codex` | 直接进入 Codex 任务列表 |
 | `/current` | 当前模式与会话 |
 | `/show` | 当前会话进度、最近回复和改动 |
-| `/send 内容` | 立即发送给当前会话 |
+| `/send 内容` | 发送独立可见轮次；Codex 忙碌时自动等待 |
 | `/add 内容` | 追加一条串行队列指令 |
 | `/batch` | 用单独一行的 `---` 拆分多条队列指令 |
 | `/queue` | 查看当前会话的运行项与等待项 |
@@ -44,7 +44,7 @@ Codex 提问、按项目新建会话和运行中补充要求已经实现；审�
 
 | 命令 | 作用 | App Server 映射 |
 |---|---|---|
-| `/steer 内容` | 给正在运行的轮次补充要求（已实现） | `turn/steer` |
+| `/steer 内容` | 立即补充正在运行的轮次，不生成独立用户气泡（已实现） | `turn/steer` |
 | `/questions` | 重新显示等待回答的问题（已实现） | `item/tool/requestUserInput` |
 | `/answer 内容` | 回答当前任务下一条自由文本问题（已实现） | `item/tool/requestUserInput` response |
 | `/new 项目别名 \| 指令` | 在预先登记的项目中建立新任务（已实现） | `thread/start` + `turn/start` |
@@ -56,6 +56,8 @@ Codex 提问、按项目新建会话和运行中补充要求已经实现；审�
 ## 队列与通知
 
 所有持久状态都使用带 Agent 身份的键。当前实现以 `{backend, serverUrl/instanceId, sessionId}` 隔离队列、运行中任务、恢复状态和事件去重；Codex 完成事件使用 `{backend, threadId, turnId}` 去重。
+
+`/send` 对应一个独立的 `turn/start`，因此会在 Codex Desktop 中显示单独的用户消息气泡。如果当前 Codex 任务已有运行中的轮次，Hub 会等待该轮次完成后再发送。`/steer` 对应 `turn/steer`，会立即补充当前轮次，但不会生成单独气泡。
 
 `/batch` 只在上一条收到终态后发送下一条。每条完成先通知，再推进队列；最后发送“全部完成”。电脑端手动启动的任务会通知，但不会推进不相关队列。重启后会根据保存状态、会话状态、事件和最近消息决定继续等待、恢复完成或重新入队。
 

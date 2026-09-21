@@ -28,7 +28,7 @@ The visible command menu contains only routine actions:
 | `/codex` | Enter the Codex task list |
 | `/current` | Show the current mode and session |
 | `/show` | Show progress, latest output, and changes |
-| `/send prompt` | Send immediately to the selected session |
+| `/send prompt` | Send a separate visible turn; wait automatically while Codex is busy |
 | `/add prompt` | Append one sequential queue item |
 | `/batch` | Split queue items with a line containing `---` |
 | `/queue` | Show active and waiting work for the selected session |
@@ -44,7 +44,7 @@ Codex questions, project-based task creation, and active-turn steering are imple
 
 | Command | Behavior | App Server mapping |
 |---|---|---|
-| `/steer instruction` | Add input to an active turn (implemented) | `turn/steer` |
+| `/steer instruction` | Update an active turn immediately without a separate user bubble (implemented) | `turn/steer` |
 | `/questions` | Show unanswered Codex questions (implemented) | `item/tool/requestUserInput` |
 | `/answer text` | Answer the next free-text question for the selected task (implemented) | `item/tool/requestUserInput` response |
 | `/new project_alias \| prompt` | Create work in an approved project (implemented) | `thread/start` + `turn/start` |
@@ -56,6 +56,8 @@ The official [`codex app-server` documentation](https://developers.openai.com/do
 ## Queues and notifications
 
 Persistent state uses a backend-aware identity. The current implementation separates queues, in-flight items, recovery, and event deduplication with `{backend, serverUrl/instanceId, sessionId}`. Codex terminal events deduplicate with `{backend, threadId, turnId}`.
+
+`/send` maps to a distinct `turn/start`, so its prompt appears as a separate user-message bubble in Codex Desktop. If the selected Codex task already has an active turn, the Hub queues `/send` until that turn completes. `/steer` maps to `turn/steer` and updates the active turn immediately without creating a separate bubble.
 
 `/batch` dispatches the next item only after the previous item reaches a terminal state. Every item is reported before the queue advances, followed by one queue-complete notification. Work started on the computer is reported without advancing an unrelated queue. Restart recovery compares persisted state, current session status, pending events, and recent messages.
 
