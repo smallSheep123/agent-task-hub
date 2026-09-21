@@ -1458,8 +1458,8 @@ async function main(options = {}) {
         selectAgentSession(state, session)
         state.sessionMap = [session, ...(state.sessionMap || []).filter((item) => item.id !== session.id)].slice(0, 100)
         saveState()
-        const turn = await client.sendPrompt(session.id, command.arg.prompt)
         await client.setThreadName(session.id, session.title).catch((error) => log("WARN", `unable to name new Codex thread ${session.id}: ${error.message}`))
+        const turn = await client.sendPrompt(session.id, command.arg.prompt)
         session.activeTurnId = turn?.id || null
         state.selected.status = "busy"
         saveState()

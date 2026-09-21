@@ -207,6 +207,7 @@ export class CodexAppServer extends EventEmitter {
     transport = process.env.AGENT_TASK_HUB_CODEX_TRANSPORT || "private",
     wsUrl = process.env.AGENT_TASK_HUB_CODEX_WS_URL || "",
     requestTimeoutMs = 20000,
+    listRequestTimeoutMs = 60000,
     sharedConnectTimeoutMs = 5000,
     spawnFactory = spawn,
     webSocketFactory = null,
@@ -218,6 +219,7 @@ export class CodexAppServer extends EventEmitter {
     this.wsUrl = String(wsUrl || "").trim()
     this.connectionId = randomUUID()
     this.requestTimeoutMs = requestTimeoutMs
+    this.listRequestTimeoutMs = Math.max(requestTimeoutMs, listRequestTimeoutMs)
     this.sharedConnectTimeoutMs = sharedConnectTimeoutMs
     this.spawnFactory = spawnFactory
     this.webSocketFactory = webSocketFactory
@@ -227,6 +229,7 @@ export class CodexAppServer extends EventEmitter {
     this.nextId = 1
     this.pending = new Map()
     this.threads = new Map()
+    this.threadNames = new Map()
     this.loadedThreads = new Set()
     this.activeTurns = new Map()
     this.latestMessages = new Map()
@@ -299,7 +302,7 @@ export class CodexAppServer extends EventEmitter {
       this.emit("exit", { code: event.code, signal: null, detail })
     })
     this.serverInfo = await this.request("initialize", {
-      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.4.0" },
+      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.4.1" },
       capabilities: { experimentalApi: true },
     }, Math.min(this.requestTimeoutMs, this.sharedConnectTimeoutMs))
     this.notify("initialized", {})
@@ -330,7 +333,7 @@ export class CodexAppServer extends EventEmitter {
     this.lines = readline.createInterface({ input: child.stdout })
     this.lines.on("line", (line) => this.#receive(line))
     this.serverInfo = await this.request("initialize", {
-      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.4.0" },
+      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.4.1" },
       capabilities: { experimentalApi: true },
     }, transport === "shared" ? Math.min(this.requestTimeoutMs, this.sharedConnectTimeoutMs) : this.requestTimeoutMs)
     this.notify("initialized", {})
@@ -448,8 +451,13 @@ export class CodexAppServer extends EventEmitter {
   }
 
   #rememberThread(thread) {
-    if (thread?.id) this.threads.set(String(thread.id), thread)
-    return thread
+    if (!thread?.id) return thread
+    const threadId = String(thread.id)
+    const remembered = { ...(this.threads.get(threadId) || {}), ...thread }
+    const explicitName = this.threadNames.get(threadId)
+    if (explicitName) remembered.name = explicitName
+    this.threads.set(threadId, remembered)
+    return remembered
   }
 
   #notification(method, params) {
@@ -472,10 +480,12 @@ export class CodexAppServer extends EventEmitter {
       this.diffs.delete(threadId)
       this.emit("terminal", event)
     } else if (method === "thread/name/updated" && params.threadId) {
+      this.threadNames.set(String(params.threadId), String(params.name || ""))
       const previous = this.threads.get(String(params.threadId)) || { id: String(params.threadId), cwd: "", turns: [] }
       this.#rememberThread({ ...previous, name: String(params.name || "") })
     } else if ((method === "thread/closed" || method === "thread/archived" || method === "thread/deleted") && params.threadId) {
       this.loadedThreads.delete(String(params.threadId))
+      this.threadNames.delete(String(params.threadId))
     }
     this.emit("notification", { method, params })
   }
@@ -491,7 +501,7 @@ export class CodexAppServer extends EventEmitter {
         sortKey: "recency_at",
         sortDirection: "desc",
         sourceKinds: CODEX_SOURCE_KINDS,
-      })
+      }, this.listRequestTimeoutMs)
       for (const thread of response?.data || []) {
         this.#rememberThread(thread)
         sessions.push(codexThreadToSession(thread))
@@ -505,7 +515,7 @@ export class CodexAppServer extends EventEmitter {
     if (this.monitorBusy || !this.ready) return
     this.monitorBusy = true
     try {
-      const response = await this.request("thread/list", { limit, archived: false, sortKey: "recency_at", sortDirection: "desc", sourceKinds: CODEX_SOURCE_KINDS })
+      const response = await this.request("thread/list", { limit, archived: false, sortKey: "recency_at", sortDirection: "desc", sourceKinds: CODEX_SOURCE_KINDS }, this.listRequestTimeoutMs)
       for (const listed of response?.data || []) {
         this.#rememberThread(listed)
         const threadId = String(listed.id)
@@ -529,12 +539,13 @@ export class CodexAppServer extends EventEmitter {
   async startMonitor({ intervalMs = 5000, limit = 100 } = {}) {
     if (this.monitorTimer) return
     this.monitorStartedAt = Date.now()
-    await this.#pollExternalCompletions(limit)
-    this.monitorInitialized = true
     this.monitorTimer = setInterval(() => {
       void this.#pollExternalCompletions(limit).catch((error) => this.emit("diagnostic", "Codex monitor failed: " + error.message))
     }, Math.max(2000, intervalMs))
     this.monitorTimer.unref?.()
+    void this.#pollExternalCompletions(limit)
+      .catch((error) => this.emit("diagnostic", "Codex monitor baseline failed: " + error.message))
+      .finally(() => { this.monitorInitialized = true })
   }
 
   async readThread(threadId) {
@@ -566,6 +577,7 @@ export class CodexAppServer extends EventEmitter {
 
   async setThreadName(threadId, name) {
     await this.request("thread/name/set", { threadId: String(threadId), name: String(name) })
+    this.threadNames.set(String(threadId), String(name))
     const previous = this.threads.get(String(threadId)) || { id: String(threadId), cwd: "", turns: [] }
     this.#rememberThread({ ...previous, name: String(name) })
   }

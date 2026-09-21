@@ -108,6 +108,7 @@ class FakeWebSocket {
   send(serialized) {
     const request = JSON.parse(serialized)
     if (request.id === undefined) return
+    if (request.method === "thread/list") return
     const result = request.method === "initialize" ? { serverInfo: { name: "fake-ws" } }
       : request.method === "thread/start" ? { thread: { id: "thr_live", cwd: request.params.cwd, turns: [] } }
         : request.method === "thread/resume" ? { thread: { id: request.params.threadId, turns: [] } }
@@ -126,12 +127,14 @@ class FakeWebSocket {
   }
 }
 
+const fakeWebSocket = new FakeWebSocket()
 const websocketClient = new CodexAppServer({
   transport: "shared",
   wsUrl: "ws://127.0.0.1:9234",
   requestTimeoutMs: 200,
+  listRequestTimeoutMs: 200,
   sharedConnectTimeoutMs: 100,
-  webSocketFactory: () => new FakeWebSocket(),
+  webSocketFactory: () => fakeWebSocket,
 })
 await websocketClient.start()
 assert.equal(websocketClient.transport, "shared-websocket")
@@ -139,10 +142,15 @@ assert.equal(websocketClient.ready, true)
 const started = await websocketClient.startThread({ cwd: "C:\\work" })
 assert.equal(started.id, "thr_live")
 await websocketClient.setThreadName(started.id, "Live test")
+fakeWebSocket.emit("message", { data: JSON.stringify({ method: "thread/status/changed", params: { threadId: started.id, thread: { id: started.id, name: "Codex task" }, status: { type: "active" } } }) })
+assert.equal(websocketClient.threads.get(started.id).name, "Live test")
 const turn = await websocketClient.sendPrompt(started.id, "first")
 assert.equal(turn.id, "turn_live")
 assert.equal(await websocketClient.status(started.id), "busy")
 assert.equal(await websocketClient.steer(started.id, "more"), "turn_live")
+const monitorStartedAt = Date.now()
+await websocketClient.startMonitor({ intervalMs: 2000, limit: 20 })
+assert.ok(Date.now() - monitorStartedAt < 100, "monitor startup should not wait for the initial thread list")
 await websocketClient.interrupt(started.id)
 await websocketClient.archiveThread(started.id)
 await websocketClient.stop()

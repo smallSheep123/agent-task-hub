@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 ## Unreleased
 
+### Fixed
+
+- Kept Telegram and Codex commands available while the initial Codex session-list baseline is still loading.
+- Allowed up to 60 seconds for large Codex history lists without weakening the timeout for ordinary requests.
+
 ### Added
 
 - Added `/new project_alias | prompt` for safe Codex task creation from administrator-registered local projects.
