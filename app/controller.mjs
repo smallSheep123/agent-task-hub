@@ -626,6 +626,7 @@ async function main(options = {}) {
     client.on("serverRequest", (message) => { void handleCodexServerRequest(message, client).catch((error) => recordError("codex-request", error)) })
     client.on("diagnostic", (message) => { if (message) log("INFO", `Codex app-server: ${message}`) })
     await client.startMonitor({ intervalMs: Number(config.codexPollIntervalMs || 5000), limit: Number(config.codexMonitorLimit || 100) })
+    if (clearRecoveredError(state, "codex-reconnect", "codex-startup")) saveState()
     return client
   }
 
@@ -1931,7 +1932,6 @@ async function main(options = {}) {
       if (!codexClient?.ready || !codexClient.isRunning || !codexClient.agentTaskHubAttached) {
         try {
           await attachCodexAdapter()
-          if (clearRecoveredError(state, "codex-reconnect")) saveState()
           log("INFO", "Codex app-server adapter connected")
         } catch (error) {
           recordError("codex-reconnect", error)
