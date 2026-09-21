@@ -297,7 +297,7 @@ export class CodexAppServer extends EventEmitter {
       this.emit("exit", { code: event.code, signal: null, detail })
     })
     this.serverInfo = await this.request("initialize", {
-      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.3.0" },
+      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.3.1" },
       capabilities: { experimentalApi: true },
     }, Math.min(this.requestTimeoutMs, this.sharedConnectTimeoutMs))
     this.notify("initialized", {})
@@ -328,7 +328,7 @@ export class CodexAppServer extends EventEmitter {
     this.lines = readline.createInterface({ input: child.stdout })
     this.lines.on("line", (line) => this.#receive(line))
     this.serverInfo = await this.request("initialize", {
-      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.3.0" },
+      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.3.1" },
       capabilities: { experimentalApi: true },
     }, transport === "shared" ? Math.min(this.requestTimeoutMs, this.sharedConnectTimeoutMs) : this.requestTimeoutMs)
     this.notify("initialized", {})

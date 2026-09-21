@@ -91,7 +91,7 @@ OpenCode 提问不受 Telegram 当前 Agent 模式影响：单选点击后直接
 .\bridge.ps1 -Action restart -Language zh-CN
 ```
 
-连接方式保存在现有受保护配置目录的 `codexTransport` 与 `codexWsUrl` 字段中。共享模式使用官方 standalone Codex 完整包；Desktop 自带的单个可执行文件不包含完整 daemon 包。
+连接方式保存在现有受保护配置目录的 `codexTransport` 与 `codexWsUrl` 字段中。共享服务每次启动都会自动发现最新的 Codex Desktop runtime，使协议版本与界面保持一致；官方 standalone 包只作为备用。
 
 ## 管理
 

@@ -89,7 +89,7 @@ Fully restart Codex Desktop after enabling shared mode. To return to the stable 
 .\bridge.ps1 -Action restart -Language en-US
 ```
 
-The transport setting is stored as `codexTransport` and `codexWsUrl` in the existing protected configuration directory. Shared mode uses the official standalone Codex package because the Desktop-bundled executable is not a complete daemon package.
+The transport setting is stored as `codexTransport` and `codexWsUrl` in the existing protected configuration directory. The shared host discovers and uses the newest Codex Desktop runtime at every start so its protocol matches the UI; the official standalone package is only a fallback.
 
 The main command menu stays small. Advanced queue, approval, and diagnostic commands remain accepted. Buttons carry the action, backend, and session identity, so changing modes does not require repeatedly typing identifiers.
 

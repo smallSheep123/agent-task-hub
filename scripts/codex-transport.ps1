@@ -10,12 +10,11 @@ $ErrorActionPreference = 'Stop'
 $Root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $ConfigPath = Join-Path $DataRoot 'config.json'
 $Probe = Join-Path $PSScriptRoot 'codex-shared-probe.mjs'
+$HostRunner = Join-Path $PSScriptRoot 'run-codex-shared-host.ps1'
 $TaskName = 'Agent Task Hub Codex App Server'
 $WsUrl = "ws://127.0.0.1:$Port"
 
 function Find-CodexExecutable {
-    $standalone = Join-Path $env:USERPROFILE '.codex\packages\standalone\current\bin\codex.exe'
-    if (Test-Path -LiteralPath $standalone) { return $standalone }
     $desktopRoot = Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin'
     if (Test-Path -LiteralPath $desktopRoot) {
         $candidate = Get-ChildItem -LiteralPath $desktopRoot -Directory -ErrorAction SilentlyContinue |
@@ -25,6 +24,8 @@ function Find-CodexExecutable {
             Select-Object -First 1
         if ($candidate) { return [string]$candidate }
     }
+    $standalone = Join-Path $env:USERPROFILE '.codex\packages\standalone\current\bin\codex.exe'
+    if (Test-Path -LiteralPath $standalone) { return $standalone }
     $command = Get-Command codex.exe,codex.cmd,codex.ps1,codex -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($command) { return [string]$command.Source }
     throw 'Codex executable was not found.'
@@ -57,7 +58,8 @@ function Start-SharedHost([string]$Codex) {
     if (Test-SharedReady) { return }
     $occupied = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
     if ($occupied) { throw "Port $Port is already in use by process $($occupied[0].OwningProcess)." }
-    $action = New-ScheduledTaskAction -Execute $Codex -Argument "app-server --listen $WsUrl" -WorkingDirectory $env:USERPROFILE
+    $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
+    $action = New-ScheduledTaskAction -Execute $powershell -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$HostRunner`" -Port $Port" -WorkingDirectory $Root
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
