@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased
+## 0.5.0 - 2026-09-22
 
 ### Fixed
 
@@ -12,6 +12,10 @@ All notable changes to this project are documented here.
 - Allowed up to 60 seconds for large Codex history lists without weakening the timeout for ordinary requests.
 
 ### Added
+
+- Added first-class ZCode support through its desktop-bundled App Server, including session discovery, inspection, creation, prompts, sequential queues, interruption, live completion events, approvals, questions, and restart recovery.
+- Reused the existing ZCode account and provider configuration in memory without copying credentials into Hub configuration, state, logs, or the repository.
+- Added `/zcode`, a third dashboard section, ZCode-aware session buttons and callbacks, approved `zcodeProjects`, and read-only/full-path ZCode integration smoke tests.
 
 - Added `/new project_alias | prompt` for safe Codex task creation from administrator-registered local projects.
 - Added `/steer prompt` for appending instructions to an active Codex turn.

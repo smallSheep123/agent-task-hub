@@ -10,6 +10,7 @@ import { codexTaskStartedAt, codexThreadAppearsActive, elapsedDurationParts, isR
 import { telegramMarkdownBody } from "./telegram-markdown.mjs"
 import { approvalOptionsForRequest, approvalResponseForRequest, CodexAppServer, terminalEventFromNotification } from "../adapters/codex-app-server.mjs"
 import { chooseOpenCodeQuestionOption, completeOpenCodeQuestion, nextOpenCodeQuestionIndex, normalizeOpenCodeQuestion, openCodeQuestionAnswers, openCodeQuestionToken, submitOpenCodeQuestion } from "../adapters/opencode-question.mjs"
+import { ZCodeAppServer, zcodeTerminalEvent } from "../adapters/zcode-app-server.mjs"
 
 const appDir = dirname(fileURLToPath(import.meta.url))
 const dataRoot = process.env.AGENT_TASK_HUB_DATA_DIR || join(homedir(), ".config", "agent-task-hub")
@@ -30,6 +31,11 @@ let codexRetryAfter = 0
 let codexDefaultCommand = process.env.AGENT_TASK_HUB_CODEX_COMMAND || "codex"
 let codexDefaultTransport = process.env.AGENT_TASK_HUB_CODEX_TRANSPORT || "private"
 let codexDefaultWsUrl = process.env.AGENT_TASK_HUB_CODEX_WS_URL || ""
+let zcodeClient = null
+let zcodeStartPromise = null
+let zcodeLastError = null
+let zcodeRetryAfter = 0
+let zcodeDefaultBundle = process.env.AGENT_TASK_HUB_ZCODE_BUNDLE || ""
 
 async function ensureCodexClient(command = null, transport = null) {
   if (codexClient?.ready && codexClient.isRunning) return codexClient
@@ -62,6 +68,35 @@ async function ensureCodexClient(command = null, transport = null) {
     }
   })()
   return codexStartPromise
+}
+
+async function ensureZCodeClient(bundle = null) {
+  if (zcodeClient?.ready && zcodeClient.isRunning) return zcodeClient
+  if (zcodeStartPromise) return zcodeStartPromise
+  if (Date.now() < zcodeRetryAfter && zcodeLastError) throw zcodeLastError
+  zcodeStartPromise = (async () => {
+    const client = new ZCodeAppServer({ bundle: bundle || zcodeDefaultBundle })
+    try {
+      await client.start()
+      zcodeClient = client
+      zcodeLastError = null
+      zcodeRetryAfter = 0
+      client.once("exit", ({ detail }) => {
+        if (zcodeClient === client) zcodeClient = null
+        zcodeLastError = new Error(detail || "ZCode app-server stopped")
+        zcodeRetryAfter = Date.now() + 15000
+      })
+      return client
+    } catch (error) {
+      await client.stop().catch(() => {})
+      zcodeLastError = error
+      zcodeRetryAfter = Date.now() + 60000
+      throw error
+    } finally {
+      zcodeStartPromise = null
+    }
+  })()
+  return zcodeStartPromise
 }
 
 function cleanWindowsPowerShellEnv() {
@@ -181,6 +216,7 @@ export function parseCommand(text) {
   if (/^\/home(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "home" }
   if (/^\/opencode(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "opencode" }
   if (/^\/codex(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "codex" }
+  if (/^\/zcode(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "zcode" }
   if ((match = value.match(/^\/new(?:@[A-Za-z0-9_]+)?\s+([A-Za-z0-9._-]{1,64})\s*\|\s*([\s\S]{1,3500})$/i))) return { name: "new", arg: { alias: match[1], prompt: match[2].trim() } }
   if (/^\/new(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(value)) return { name: "new", arg: null }
   if (/^\/help(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "help" }
@@ -390,6 +426,7 @@ async function discoverOpenCodeSessions() {
 async function discoverSessions() {
   const openCode = await discoverOpenCodeSessions()
   let codex = []
+  let zcode = []
   try {
     const client = await ensureCodexClient()
     codex = await client.listSessions({ limit: 200 })
@@ -397,12 +434,19 @@ async function discoverSessions() {
     codexLastError = error
     log("WARN", `Codex adapter unavailable: ${error.message}`)
   }
+  try {
+    const client = await ensureZCodeClient()
+    zcode = await client.listSessions({ limit: 200 })
+  } catch (error) {
+    zcodeLastError = error
+    log("WARN", `ZCode adapter unavailable: ${error.message}`)
+  }
   const updated = (item) => {
     let value = Number(item.updated || item.updatedAt || 0)
     if (value > 0 && value < 1e12) value *= 1000
     return value
   }
-  return [...openCode, ...codex].sort((left, right) => updated(right) - updated(left))
+  return [...openCode, ...codex, ...zcode].sort((left, right) => updated(right) - updated(left))
 }
 
 function latestAssistant(messages) {
@@ -412,6 +456,10 @@ function latestAssistant(messages) {
     if (value) return value
   }
   return t("noAssistantReply")
+}
+
+function workspacePathForZCode(workspace) {
+  return String(workspace?.workspacePath || workspace?.path || workspace?.cwd || "")
 }
 
 function openCodeTimestamp(message) {
@@ -475,6 +523,19 @@ async function getSessionView(session) {
     const status = await client.status(session.id)
     return compact(t("codexSessionView", thread?.name || thread?.preview || session.title, status, thread?.cwd || session.directory, turns.length, latest?.text || latest?.review || t("noAssistantReply")))
   }
+  if (session.backend === "zcode") {
+    const client = await ensureZCodeClient()
+    const snapshot = await client.readSession(session.id, 12)
+    const info = snapshot?.session || snapshot?.snapshot?.session || session
+    const messages = Array.isArray(snapshot?.messages) ? snapshot.messages : Array.isArray(snapshot?.snapshot?.messages) ? snapshot.snapshot.messages : []
+    const latest = [...messages].reverse().find((item) => {
+      const role = item?.role || item?.info?.role || item?.message?.role
+      return role === "assistant" || item?.type === "assistant"
+    })
+    const latestText = latest?.content || latest?.text || latest?.message?.content
+      || (latest?.parts || []).filter((part) => part?.type === "text").map((part) => part.text || "").join("\n")
+    return compact(t("zcodeSessionView", info?.title || session.title, info?.status || session.status, workspacePathForZCode(info?.workspace) || session.directory, info?.model?.modelId || t("none"), latestText || t("noAssistantReply")))
+  }
   const id = encodeURIComponent(session.id)
   const [info, messages, todos, statuses] = await Promise.all([
     requestSessionJson(session, `/session/${id}`),
@@ -495,6 +556,7 @@ async function main(options = {}) {
   codexDefaultCommand = config.codexCommand || process.env.AGENT_TASK_HUB_CODEX_COMMAND || "codex"
   codexDefaultTransport = config.codexTransport || process.env.AGENT_TASK_HUB_CODEX_TRANSPORT || "private"
   codexDefaultWsUrl = config.codexWsUrl || process.env.AGENT_TASK_HUB_CODEX_WS_URL || ""
+  zcodeDefaultBundle = config.zcodeBundle || process.env.AGENT_TASK_HUB_ZCODE_BUNDLE || ""
   if (!config?.allowedUserId || !config?.allowedChatId || !config?.botTokenProtected) throw new Error("Incomplete Agent Task Hub configuration")
   i18n = createI18n(config.language || "en-US")
   const botToken = process.env.AGENT_TASK_HUB_BOT_TOKEN || decryptToken()
@@ -512,6 +574,7 @@ async function main(options = {}) {
   state.permissionRequests ||= {}
   state.openCodeQuestions ||= {}
   state.codexRequests ||= {}
+  state.zcodeRequests ||= {}
   state.lastError ||= null
   const startedAt = new Date().toISOString()
   let telegramReady = false
@@ -653,6 +716,112 @@ async function main(options = {}) {
     client.on("diagnostic", (message) => { if (message) log("INFO", `Codex app-server: ${message}`) })
     await client.startMonitor({ intervalMs: Number(config.codexPollIntervalMs || 5000), limit: Number(config.codexMonitorLimit || 100) })
     if (clearRecoveredError(state, "codex-reconnect", "codex-startup")) saveState()
+    return client
+  }
+
+  function zcodeRequestToken(message, client) {
+    return createHash("sha256").update(`${client.connectionId}\n${String(message.id)}\n${message.method}\n${message.params?.sessionId || ""}`).digest("hex").slice(0, 16)
+  }
+
+  function zcodeRequestText(request) {
+    const params = request.params || {}
+    const title = (state.sessionMap || []).find((item) => item.backend === "zcode" && item.id === params.sessionId)?.title || params.sessionId || t("unknownSession")
+    if (request.kind === "question") {
+      const questions = params.questions?.length ? params.questions : [{ header: t("question"), question: params.prompt || t("question"), options: [] }]
+      return t("zcodeQuestion", title, questions.map((item, index) => `${index + 1}. ${item.header ? `[${item.header}] ` : ""}${item.question}`).join("\n"))
+    }
+    return t("zcodeApproval", title, params.toolName || t("unknown"), params.riskLevel || t("unknown"), params.reason || t("none"), compact(JSON.stringify(params.input ?? {}), 1200))
+  }
+
+  function zcodeRequestKeyboard(token, request) {
+    if (request.kind === "approval") {
+      const rows = (request.params?.options || []).map((option, index) => [{ text: String(option.name || option.kind || `${index + 1}`).slice(0, 55), callback_data: `zap:${token}:${index}` }])
+      return { inline_keyboard: rows }
+    }
+    const rows = []
+    const questions = request.params?.questions || []
+    questions.forEach((question, questionIndex) => (question.options || []).forEach((option, optionIndex) => {
+      rows.push([{ text: `${questionIndex + 1}. ${option.label}`.slice(0, 55), callback_data: `zqa:${token}:${questionIndex}:${optionIndex}` }])
+    }))
+    return { inline_keyboard: rows }
+  }
+
+  async function sendZCodeRequest(token, request, repeat = false) {
+    const keyboard = zcodeRequestKeyboard(token, request)
+    const message = await send(zcodeRequestText(request), keyboard.inline_keyboard.length ? { reply_markup: keyboard } : {})
+    request.lastPresentedAt = new Date().toISOString()
+    if (!repeat || !request.notifiedAt) {
+      request.notifiedAt = request.lastPresentedAt
+      request.messageId = message?.message_id || null
+      saveState()
+    }
+  }
+
+  async function refreshZCodeRequests() {
+    if (!zcodeClient?.ready) return
+    const pending = Object.entries(state.zcodeRequests)
+      .filter(([, request]) => !request.resolvedAt && !request.notifiedAt && request.connectionId === zcodeClient.connectionId)
+      .slice(0, 10)
+    for (const [token, request] of pending) await sendZCodeRequest(token, request)
+  }
+
+  async function handleZCodeServerRequest(message, client) {
+    const kind = message.method === "interaction/requestPermission" ? "approval"
+      : message.method === "interaction/requestUserInput" ? "question" : null
+    if (!kind) {
+      client.respondError(message.id, -32601, "Agent Task Hub does not implement this ZCode app-server request")
+      log("WARN", `unsupported ZCode server request method=${message.method}`)
+      return
+    }
+    const token = zcodeRequestToken(message, client)
+    state.zcodeRequests[token] = {
+      requestId: message.id,
+      method: message.method,
+      params: message.params || {},
+      kind,
+      connectionId: client.connectionId,
+      answers: {},
+      createdAt: new Date().toISOString(),
+      notifiedAt: null,
+      resolvedAt: null,
+    }
+    saveState()
+    await sendZCodeRequest(token, state.zcodeRequests[token])
+  }
+
+  function activeZCodeRequest(token) {
+    const request = state.zcodeRequests[token]
+    if (!request || request.resolvedAt || !zcodeClient?.ready || request.connectionId !== zcodeClient.connectionId) throw new Error(t("zcodeRequestExpired"))
+    return request
+  }
+
+  function completeZCodeQuestionIfReady(request) {
+    const questions = request.params?.questions || []
+    if (questions.length && questions.some((question) => !request.answers?.[question.question])) return false
+    if (!questions.length && !request.answers?.answer) return false
+    zcodeClient.respond(request.requestId, { action: "accept", content: questions.length ? { answers: request.answers } : { answer: request.answers.answer } })
+    request.resolvedAt = new Date().toISOString()
+    request.resolution = "answered"
+    saveState()
+    return true
+  }
+
+  async function attachZCodeAdapter() {
+    const client = await ensureZCodeClient(config.zcodeBundle || null)
+    if (client.agentTaskHubAttached) return client
+    client.agentTaskHubAttached = true
+    for (const request of Object.values(state.zcodeRequests)) {
+      if (!request.resolvedAt && request.connectionId !== client.connectionId) {
+        request.resolvedAt = new Date().toISOString()
+        request.resolution = "connection-closed"
+      }
+    }
+    saveState()
+    client.on("terminal", (event) => { void handleCodexTerminal(event).catch((error) => recordError("zcode-event", error)) })
+    client.on("serverRequest", (message) => { void handleZCodeServerRequest(message, client).catch((error) => recordError("zcode-request", error)) })
+    client.on("diagnostic", (message) => { if (message) log("INFO", `ZCode app-server: ${message}`) })
+    await client.startMonitor({ intervalMs: Number(config.zcodePollIntervalMs || 5000) })
+    if (clearRecoveredError(state, "zcode-reconnect", "zcode-startup")) saveState()
     return client
   }
 
@@ -1108,6 +1277,10 @@ async function main(options = {}) {
         const client = await ensureCodexClient(config.codexCommand || null)
         return await client.status(session.id)
       }
+      if (session.backend === "zcode") {
+        const client = await ensureZCodeClient(config.zcodeBundle || null)
+        return await client.status(session.id)
+      }
       const statuses = await requestSessionJson(session, "/session/status")
       return statuses?.[session.id]?.type || "idle"
     } catch {
@@ -1128,6 +1301,10 @@ async function main(options = {}) {
     try {
       if ((session.backend || "opencode") === "codex") {
         const client = await ensureCodexClient(config.codexCommand || null)
+        const turn = await client.sendPrompt(session.id, item.text)
+        item.turnId = turn?.id || null
+      } else if (session.backend === "zcode") {
+        const client = await ensureZCodeClient(config.zcodeBundle || null)
         const turn = await client.sendPrompt(session.id, item.text)
         item.turnId = turn?.id || null
       } else {
@@ -1196,19 +1373,21 @@ async function main(options = {}) {
     const approvals = Object.values(state.permissionRequests).filter((item) => !item.resolvedAt).length
       + Object.values(state.openCodeQuestions).filter((item) => !item.resolvedAt).length
       + Object.values(state.codexRequests).filter((item) => !item.resolvedAt).length
+      + Object.values(state.zcodeRequests).filter((item) => !item.resolvedAt).length
     const codex = codexClient?.ready && codexClient.isRunning
       ? `${t("online")} · ${t(String(codexClient.transport || "").startsWith("shared") ? "codexShared" : "codexPrivate")}`
       : t("offline")
-    return compact(t("health", openCode, codex, instances.length, sessions.length, state.selected?.title || t("notSelected"), approvals, running, waiting, paused, durationText(startedAt), lastError))
+    const zcode = zcodeClient?.ready && zcodeClient.isRunning ? t("online") : t("offline")
+    return compact(t("health", openCode, codex, zcode, instances.length, sessions.length, state.selected?.title || t("notSelected"), approvals, running, waiting, paused, durationText(startedAt), lastError))
   }
 
   function backendText(backend) {
-    return backend === "codex" ? t("agentCodex") : t("agentOpenCode")
+    return backend === "codex" ? t("agentCodex") : backend === "zcode" ? t("agentZCode") : t("agentOpenCode")
   }
 
   function modeText() {
     if (state.viewMode !== "agent") return t("globalMode")
-    return state.activeBackend === "codex" ? t("codexMode") : t("openCodeMode")
+    return state.activeBackend === "codex" ? t("codexMode") : state.activeBackend === "zcode" ? t("zcodeMode") : t("openCodeMode")
   }
 
   function shortLine(value, max = 90) {
@@ -1221,7 +1400,9 @@ async function main(options = {}) {
       approvals: Object.values(state.permissionRequests).filter((item) => !item.resolvedAt).length,
       questions: Object.values(state.openCodeQuestions).filter((item) => !item.resolvedAt).length,
     }
-    const requests = Object.values(state.codexRequests).filter((item) => !item.resolvedAt && item.connectionId === codexClient?.connectionId)
+    const requests = backend === "zcode"
+      ? Object.values(state.zcodeRequests).filter((item) => !item.resolvedAt && item.connectionId === zcodeClient?.connectionId)
+      : Object.values(state.codexRequests).filter((item) => !item.resolvedAt && item.connectionId === codexClient?.connectionId)
     return {
       approvals: requests.filter((item) => item.kind === "approval").length,
       questions: requests.filter((item) => item.kind === "question").length,
@@ -1235,8 +1416,12 @@ async function main(options = {}) {
     if (backend === "opencode") {
       approval = Object.values(state.permissionRequests).some((item) => !item.resolvedAt && item.sessionId === session.id)
       question = Object.values(state.openCodeQuestions).some((item) => !item.resolvedAt && item.sessionId === session.id)
-    } else {
+    } else if (backend === "codex") {
       const requests = Object.values(state.codexRequests).filter((item) => !item.resolvedAt && item.connectionId === codexClient?.connectionId && item.params?.threadId === session.id)
+      approval = requests.some((item) => item.kind === "approval")
+      question = requests.some((item) => item.kind === "question")
+    } else {
+      const requests = Object.values(state.zcodeRequests).filter((item) => !item.resolvedAt && item.connectionId === zcodeClient?.connectionId && item.params?.sessionId === session.id)
       approval = requests.some((item) => item.kind === "approval")
       question = requests.some((item) => item.kind === "question")
     }
@@ -1257,6 +1442,7 @@ async function main(options = {}) {
         const client = await ensureCodexClient(config.codexCommand || null)
         return codexTaskStartedAt(await client.readThread(session.id))
       }
+      if (session.backend === "zcode") return timestampMilliseconds(session.dashboardStartedAt)
       return openCodeTaskStartedAt(await recentSessionMessages(session, 30))
     } catch (error) {
       log("WARN", `dashboard timing unavailable backend=${session.backend || "opencode"} session=${session.id}: ${error.message}`)
@@ -1304,7 +1490,9 @@ async function main(options = {}) {
     const running = sessions.filter((session) => isRunningStatus(session.status))
     const visible = running.slice(0, 3)
     const starts = await Promise.all(visible.map((session) => taskStartedAt(session)))
-    const online = backend === "opencode" ? loadInstances().length > 0 : Boolean(codexClient?.ready && codexClient.isRunning)
+    const online = backend === "opencode" ? loadInstances().length > 0
+      : backend === "codex" ? Boolean(codexClient?.ready && codexClient.isRunning)
+        : Boolean(zcodeClient?.ready && zcodeClient.isRunning)
     const lines = [t("homeAgentSummary", online ? "🟢" : "🔴", backendText(backend), running.length, waitingCountForSessions(sessions), sessions.length)]
     if (!visible.length) lines.push(t("homeNoRunning"))
     visible.forEach((session, index) => {
@@ -1319,7 +1507,7 @@ async function main(options = {}) {
 
   function homeKeyboard(activeSessions = []) {
     const rows = [
-      [{ text: t("buttonOpenCode"), callback_data: "agent:opencode" }, { text: t("buttonCodex"), callback_data: "agent:codex" }],
+      [{ text: t("buttonOpenCode"), callback_data: "agent:opencode" }, { text: t("buttonCodex"), callback_data: "agent:codex" }, { text: t("buttonZCode"), callback_data: "agent:zcode" }],
     ]
     for (const session of activeSessions.slice(0, 4)) rows.push([{
       text: `▶ ${backendText(session.backend)} · ${shortLine(session.title, 38)}`,
@@ -1331,14 +1519,15 @@ async function main(options = {}) {
 
   async function buildHomePayload() {
     const sessions = await enrichCodexDashboardActivity(await discoverSessions())
-    const [openCode, codex] = await Promise.all([homeAgentSection(sessions, "opencode"), homeAgentSection(sessions, "codex")])
+    const [openCode, codex, zcode] = await Promise.all([homeAgentSection(sessions, "opencode"), homeAgentSection(sessions, "codex"), homeAgentSection(sessions, "zcode")])
     const openRequests = requestCounts("opencode")
     const codexRequests = requestCounts("codex")
-    const requestSummary = t("homePendingRequests", t("homeRequestCount", openRequests.approvals, openRequests.questions), t("homeRequestCount", codexRequests.approvals, codexRequests.questions))
+    const zcodeRequests = requestCounts("zcode")
+    const requestSummary = t("homePendingRequests", t("homeRequestCount", openRequests.approvals, openRequests.questions), t("homeRequestCount", codexRequests.approvals, codexRequests.questions), t("homeRequestCount", zcodeRequests.approvals, zcodeRequests.questions))
     const selected = state.selected ? `${backendText(state.selected.backend)} · ${state.selected.title}` : t("notSelected")
     const lastError = state.lastError ? t("homeRecentError", state.lastError.scope, shortLine(state.lastError.message, 180)) : ""
-    const text = [t("homeTitle"), t("homeSelected", selected), requestSummary, openCode.text, codex.text, lastError].filter(Boolean).join("\n\n")
-    return { text, reply_markup: homeKeyboard([...openCode.running, ...codex.running]), sessions, running: [...openCode.running, ...codex.running] }
+    const text = [t("homeTitle"), t("homeSelected", selected), requestSummary, openCode.text, codex.text, zcode.text, lastError].filter(Boolean).join("\n\n")
+    return { text, reply_markup: homeKeyboard([...openCode.running, ...codex.running, ...zcode.running]), sessions, running: [...openCode.running, ...codex.running, ...zcode.running] }
   }
 
   async function commandHome() {
@@ -1357,6 +1546,15 @@ async function main(options = {}) {
         return commandSessions(1, "", "codex")
       } catch (error) {
         return send(t("codexUnavailable", compact(error.message, 300)), { reply_markup: { inline_keyboard: [[{ text: t("buttonHome"), callback_data: "home" }, { text: t("buttonOpenCode"), callback_data: "agent:opencode" }]] } })
+      }
+    }
+    if (backend === "zcode") {
+      saveState()
+      try {
+        await attachZCodeAdapter()
+        return commandSessions(1, "", "zcode")
+      } catch (error) {
+        return send(t("zcodeUnavailable", compact(error.message, 300)), { reply_markup: { inline_keyboard: [[{ text: t("buttonHome"), callback_data: "home" }, { text: t("buttonOpenCode"), callback_data: "agent:opencode" }]] } })
       }
     }
     saveState()
@@ -1414,8 +1612,8 @@ async function main(options = {}) {
     nav.push({ text: `${currentPage}/${pageCount}`, callback_data: "noop" })
     if (currentPage < pageCount) nav.push({ text: t("next"), callback_data: `${prefix}:${currentPage + 1}` })
     keyboard.push(nav)
-    keyboard.push([{ text: t("buttonOpenCode"), callback_data: "agent:opencode" }, { text: t("buttonCodex"), callback_data: "agent:codex" }, { text: t("buttonHome"), callback_data: "home" }])
-    const heading = needle ? t("searchHeading", compact(query, 80)) : backend === "opencode" ? t("openCodeSessionsHeading") : backend === "codex" ? t("codexSessionsHeading") : t("sessionsHeading")
+    keyboard.push([{ text: t("buttonOpenCode"), callback_data: "agent:opencode" }, { text: t("buttonCodex"), callback_data: "agent:codex" }, { text: t("buttonZCode"), callback_data: "agent:zcode" }, { text: t("buttonHome"), callback_data: "home" }])
+    const heading = needle ? t("searchHeading", compact(query, 80)) : backend === "opencode" ? t("openCodeSessionsHeading") : backend === "codex" ? t("codexSessionsHeading") : backend === "zcode" ? t("zcodeSessionsHeading") : t("sessionsHeading")
     await send(t("page", heading, filtered.length, currentPage, pageCount, lines.join("\n\n")), { reply_markup: { inline_keyboard: keyboard } })
   }
 
@@ -1424,6 +1622,7 @@ async function main(options = {}) {
     if ((state.selected.backend || "opencode") !== state.activeBackend) return null
     if (state.activeBackend === "opencode") loopbackBase(state.selected.serverUrl)
     else if (state.activeBackend === "codex") await attachCodexAdapter()
+    else if (state.activeBackend === "zcode") await attachZCodeAdapter()
     else return null
     return state.selected
   }
@@ -1434,13 +1633,31 @@ async function main(options = {}) {
     if (command.name === "home") return commandHome()
     if (command.name === "opencode") return commandAgent("opencode")
     if (command.name === "codex") return commandAgent("codex")
+    if (command.name === "zcode") return commandAgent("zcode")
     if (command.name === "new") {
       if (!command.arg) return send(t("newUsage"))
-      const aliases = Object.keys(config.codexProjects || {})
-      const project = resolveCodexProject(config.codexProjects, command.arg.alias)
+      const backend = state.viewMode === "agent" && state.activeBackend === "zcode" ? "zcode" : "codex"
+      const projects = backend === "zcode" ? (config.zcodeProjects || config.codexProjects || {}) : (config.codexProjects || {})
+      const aliases = Object.keys(projects)
+      const project = resolveCodexProject(projects, command.arg.alias)
       if (!project) return send(t("projectNotFound", command.arg.alias, aliases.length ? aliases.join(", ") : t("none")))
       try {
         if (!existsSync(project.directory) || !statSync(project.directory).isDirectory()) return send(t("projectUnavailable", project.alias, project.directory))
+        if (backend === "zcode") {
+          const client = await attachZCodeAdapter()
+          const session = await client.startSession({ cwd: project.directory, model: config.zcodeNewModel || null, thoughtLevel: config.zcodeThoughtLevel || "high" })
+          session.title = shortLine(command.arg.prompt, 180)
+          session.status = "busy"
+          session.updatedAt = Date.now()
+          selectAgentSession(state, session)
+          state.sessionMap = [session, ...(state.sessionMap || []).filter((item) => item.id !== session.id)].slice(0, 100)
+          saveState()
+          await client.sendPrompt(session.id, command.arg.prompt)
+          return send(t("newStartedAgent", backendText(backend), project.alias, session.title, session.id, session.directory), { reply_markup: { inline_keyboard: [
+            [{ text: t("viewDetails"), callback_data: encodeSessionAction("show", session) }, { text: t("append"), callback_data: encodeSessionAction("addhelp", session) }],
+            [{ text: t("viewQueue"), callback_data: encodeSessionAction("queue", session) }, { text: t("stopTask"), callback_data: encodeSessionAction("stopask", session) }],
+          ] } })
+        }
         const client = await attachCodexAdapter()
         const thread = await client.startThread({ cwd: project.directory, model: config.codexNewModel || null })
         if (!thread?.id) throw new Error("Codex thread/start returned no thread id")
@@ -1463,7 +1680,7 @@ async function main(options = {}) {
         session.activeTurnId = turn?.id || null
         state.selected.status = "busy"
         saveState()
-        return send(t("newStarted", project.alias, session.title, session.id, session.directory), { reply_markup: { inline_keyboard: [
+        return send(t("newStartedAgent", backendText(backend), project.alias, session.title, session.id, session.directory), { reply_markup: { inline_keyboard: [
           [{ text: t("viewDetails"), callback_data: encodeSessionAction("show", session) }, { text: t("append"), callback_data: encodeSessionAction("addhelp", session) }],
           [{ text: t("viewQueue"), callback_data: encodeSessionAction("queue", session) }, { text: t("stopTask"), callback_data: encodeSessionAction("stopask", session) }],
         ] } })
@@ -1475,25 +1692,30 @@ async function main(options = {}) {
       const codexStatus = codexClient?.ready && codexClient.isRunning
         ? `${t("online")} · ${t(String(codexClient.transport || "").startsWith("shared") ? "codexShared" : "codexPrivate")}`
         : t("offline")
-      return send(t("status", loadInstances().length, codexStatus, modeText(), state.selected ? `${backendText(state.selected.backend)} · ${state.selected.title}` : t("notSelected")))
+      const zcodeStatus = zcodeClient?.ready && zcodeClient.isRunning ? t("online") : t("offline")
+      return send(t("status", loadInstances().length, codexStatus, zcodeStatus, modeText(), state.selected ? `${backendText(state.selected.backend)} · ${state.selected.title}` : t("notSelected")))
     }
     if (command.name === "health") return send(await healthText())
     if (command.name === "approvals") {
       await refreshPermissions()
       const pending = Object.entries(state.permissionRequests).filter(([, item]) => !item.resolvedAt)
       const codexPending = Object.entries(state.codexRequests).filter(([, item]) => item.kind === "approval" && !item.resolvedAt && item.connectionId === codexClient?.connectionId)
-      if (!pending.length && !codexPending.length) return send(t("noApprovals"))
+      const zcodePending = Object.entries(state.zcodeRequests).filter(([, item]) => item.kind === "approval" && !item.resolvedAt && item.connectionId === zcodeClient?.connectionId)
+      if (!pending.length && !codexPending.length && !zcodePending.length) return send(t("noApprovals"))
       for (const [token, item] of pending.slice(0, 10)) await sendPermissionRequest(token, item, true)
       for (const [token, item] of codexPending.slice(0, 10)) await sendCodexRequest(token, item, true)
+      for (const [token, item] of zcodePending.slice(0, 10)) await sendZCodeRequest(token, item, true)
       return
     }
     if (command.name === "questions") {
       await refreshOpenCodeQuestions()
       const openCodePending = Object.entries(state.openCodeQuestions).filter(([, item]) => !item.resolvedAt)
       const codexPending = Object.entries(state.codexRequests).filter(([, item]) => item.kind === "question" && !item.resolvedAt && item.connectionId === codexClient?.connectionId)
-      if (!openCodePending.length && !codexPending.length) return send(t("noQuestions"))
+      const zcodePending = Object.entries(state.zcodeRequests).filter(([, item]) => item.kind === "question" && !item.resolvedAt && item.connectionId === zcodeClient?.connectionId)
+      if (!openCodePending.length && !codexPending.length && !zcodePending.length) return send(t("noQuestions"))
       for (const [token, item] of openCodePending.slice(0, 10)) await sendOpenCodeQuestion(token, item, true)
       for (const [token, item] of codexPending.slice(0, Math.max(0, 10 - openCodePending.length))) await sendCodexRequest(token, item, true)
+      for (const [token, item] of zcodePending.slice(0, Math.max(0, 10 - openCodePending.length - codexPending.length))) await sendZCodeRequest(token, item, true)
       return
     }
     if (command.name === "answer") {
@@ -1501,6 +1723,7 @@ async function main(options = {}) {
       const candidates = [
         ...Object.entries(state.openCodeQuestions).filter(([, item]) => !item.resolvedAt).map(([token, request]) => ({ backend: "opencode", token, request, sessionId: request.sessionId })),
         ...Object.entries(state.codexRequests).filter(([, item]) => item.kind === "question" && !item.resolvedAt && item.connectionId === codexClient?.connectionId).map(([token, request]) => ({ backend: "codex", token, request, sessionId: request.params?.threadId })),
+        ...Object.entries(state.zcodeRequests).filter(([, item]) => item.kind === "question" && !item.resolvedAt && item.connectionId === zcodeClient?.connectionId).map(([token, request]) => ({ backend: "zcode", token, request, sessionId: request.params?.sessionId })),
       ].sort((left, right) => {
         const leftTime = Date.parse(left.request.lastPresentedAt || left.request.notifiedAt || left.request.createdAt || left.request.firstSeenAt || 0)
         const rightTime = Date.parse(right.request.lastPresentedAt || right.request.notifiedAt || right.request.createdAt || right.request.firstSeenAt || 0)
@@ -1519,6 +1742,15 @@ async function main(options = {}) {
         saveState()
         if (!done) await sendOpenCodeQuestion(target.token, target.request, true)
         return send(done ? t("openCodeQuestionAnswered") : t("questionAnswerSaved"))
+      }
+      if (target.backend === "zcode") {
+        const questions = target.request.params?.questions || []
+        const question = questions.find((item) => !target.request.answers?.[item.question])
+        if (question) target.request.answers[question.question] = command.arg
+        else target.request.answers.answer = command.arg
+        const done = completeZCodeQuestionIfReady(target.request)
+        saveState()
+        return send(done ? t("zcodeQuestionAnswered") : t("zcodeAnswerSaved"))
       }
       const question = (target.request.params?.questions || []).find((item) => !target.request.answers?.[item.id])
       if (!question) return send(t("noQuestions"))
@@ -1649,6 +1881,9 @@ async function main(options = {}) {
       if ((selected.backend || "opencode") === "codex") {
         const client = await ensureCodexClient(config.codexCommand || null)
         await client.sendPrompt(selected.id, command.arg)
+      } else if (selected.backend === "zcode") {
+        const client = await ensureZCodeClient(config.zcodeBundle || null)
+        await client.sendPrompt(selected.id, command.arg)
       } else {
         const id = encodeURIComponent(selected.id)
         await requestSessionJson(selected, `/session/${id}/prompt_async`, {
@@ -1755,6 +1990,32 @@ async function main(options = {}) {
         await telegram("answerCallbackQuery", { callback_query_id: query.id, text: done ? t("codexQuestionAnswered") : t("codexAnswerSaved") })
         if (done && query.message?.message_id) await telegram("editMessageReplyMarkup", { chat_id: String(config.allowedChatId), message_id: query.message.message_id, reply_markup: { inline_keyboard: [] } }).catch(() => {})
       }
+      else if (/^zap:[0-9a-f]{16}:\d+$/.test(data)) {
+        const [, token, optionText] = data.split(":")
+        const request = activeZCodeRequest(token)
+        if (request.kind !== "approval") throw new Error(t("alreadyHandled"))
+        const option = request.params?.options?.[Number(optionText)]
+        if (!option?.response) throw new Error(t("approvalExpired"))
+        zcodeClient.respond(request.requestId, option.response)
+        request.resolvedAt = new Date().toISOString()
+        request.resolution = option.optionId || option.kind || String(optionText)
+        saveState()
+        await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("zcodeApprovalHandled") })
+        if (query.message?.message_id) await telegram("editMessageReplyMarkup", { chat_id: String(config.allowedChatId), message_id: query.message.message_id, reply_markup: { inline_keyboard: [] } }).catch(() => {})
+      }
+      else if (/^zqa:[0-9a-f]{16}:\d+:\d+$/.test(data)) {
+        const [, token, questionText, optionText] = data.split(":")
+        const request = activeZCodeRequest(token)
+        if (request.kind !== "question") throw new Error(t("alreadyHandled"))
+        const question = request.params?.questions?.[Number(questionText)]
+        const option = question?.options?.[Number(optionText)]
+        if (!question || !option) throw new Error(t("questionExpired"))
+        request.answers[question.question] = option.value || option.label
+        const done = completeZCodeQuestionIfReady(request)
+        saveState()
+        await telegram("answerCallbackQuery", { callback_query_id: query.id, text: done ? t("zcodeQuestionAnswered") : t("zcodeAnswerSaved") })
+        if (done && query.message?.message_id) await telegram("editMessageReplyMarkup", { chat_id: String(config.allowedChatId), message_id: query.message.message_id, reply_markup: { inline_keyboard: [] } }).catch(() => {})
+      }
       else if (data === "noop") await telegram("answerCallbackQuery", { callback_query_id: query.id })
       else if (data === "cancel") await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("cancelled") })
       else if (data === "home") {
@@ -1819,6 +2080,9 @@ async function main(options = {}) {
         saveState()
         if ((selected.backend || "opencode") === "codex") {
           const client = await ensureCodexClient(config.codexCommand || null)
+          await client.interrupt(selected.id)
+        } else if (selected.backend === "zcode") {
+          const client = await ensureZCodeClient(config.zcodeBundle || null)
           await client.interrupt(selected.id)
         } else {
           await requestSessionJson(selected, `/session/${encodeURIComponent(selected.id)}/abort`, { method: "POST" })
@@ -1916,6 +2180,17 @@ async function main(options = {}) {
       atomicJson(join(eventsDir, `${Date.now()}-${randomUUID()}.json`), payload)
       return true
     }
+    if (session.backend === "zcode") {
+      const client = await ensureZCodeClient(config.zcodeBundle || null)
+      const result = await client.request("session/events", { sessionId: session.id, limit: 200 })
+      const sentAt = Date.parse(item.dispatchedAt || item.createdAt || 0)
+      const event = [...(result?.events || [])].reverse().find((candidate) => ["turn.completed", "turn.failed"].includes(candidate?.type) && timestampMilliseconds(candidate?.timestamp) >= sentAt - 5000)
+      if (!event) return false
+      const payload = zcodeTerminalEvent(event, { sessionId: session.id, title: session.title, workspace: { workspacePath: session.directory } })
+      payload.recovered = true
+      atomicJson(join(eventsDir, `${Date.now()}-${randomUUID()}.json`), payload)
+      return true
+    }
     const messages = await recentSessionMessages(session)
     const sentAt = Date.parse(item.dispatchedAt || item.createdAt || 0)
     const prompt = messages.filter((message) => message?.info?.role === "user"
@@ -1996,6 +2271,10 @@ async function main(options = {}) {
         recordError("codex-request-monitor", error)
         log("WARN", `Codex request monitor failed: ${error.message}`)
       }
+      try { await refreshZCodeRequests() } catch (error) {
+        recordError("zcode-request-monitor", error)
+        log("WARN", `ZCode request monitor failed: ${error.message}`)
+      }
       await sleep(5000)
     }
   }
@@ -2008,6 +2287,20 @@ async function main(options = {}) {
           log("INFO", "Codex app-server adapter connected")
         } catch (error) {
           recordError("codex-reconnect", error)
+        }
+      }
+      await sleep(15000)
+    }
+  }
+
+  async function zcodeLoop() {
+    while (true) {
+      if (!zcodeClient?.ready || !zcodeClient.isRunning || !zcodeClient.agentTaskHubAttached) {
+        try {
+          await attachZCodeAdapter()
+          log("INFO", "ZCode app-server adapter connected")
+        } catch (error) {
+          recordError("zcode-reconnect", error)
         }
       }
       await sleep(15000)
@@ -2095,13 +2388,15 @@ async function main(options = {}) {
 
   if (options.homeCheck) {
     try { await attachCodexAdapter() } catch {}
+    try { await attachZCodeAdapter() } catch {}
     const payload = await buildHomePayload()
     const callbacks = payload.reply_markup.inline_keyboard.flat().map((button) => String(button.callback_data || ""))
-    if (!payload.text.includes(t("agentOpenCode")) || !payload.text.includes(t("agentCodex"))) throw new Error("Dashboard agent sections are incomplete")
+    if (!payload.text.includes(t("agentOpenCode")) || !payload.text.includes(t("agentCodex")) || !payload.text.includes(t("agentZCode"))) throw new Error("Dashboard agent sections are incomplete")
     if (payload.text.length > 3900) throw new Error("Dashboard text exceeds Telegram limit")
     if (callbacks.some((value) => Buffer.byteLength(value, "utf8") > 64)) throw new Error("Dashboard callback exceeds Telegram limit")
     console.log(`HOME_CHECK=PASS SESSIONS=${payload.sessions.length} RUNNING=${payload.running.length} TEXT=${payload.text.length} BUTTONS=${callbacks.length}`)
     await codexClient?.stop().catch(() => {})
+    await zcodeClient?.stop().catch(() => {})
     return
   }
 
@@ -2113,12 +2408,19 @@ async function main(options = {}) {
     log("WARN", `Codex adapter startup failed; OpenCode remains available: ${error.message}`)
   }
   try {
+    await attachZCodeAdapter()
+    log("INFO", "ZCode app-server adapter connected")
+  } catch (error) {
+    recordError("zcode-startup", error)
+    log("WARN", `ZCode adapter startup failed; other agents remain available: ${error.message}`)
+  }
+  try {
     await configureTelegram(true)
   } catch (error) {
     recordError("telegram-startup", error)
     log("WARN", `Telegram startup connection failed; retrying without exiting: ${error.message}`)
   }
-  await Promise.all([telegramLoop(), eventLoop(), recoveryLoop(), permissionLoop(), codexLoop(), openCodeMonitorLoop()])
+  await Promise.all([telegramLoop(), eventLoop(), recoveryLoop(), permissionLoop(), codexLoop(), zcodeLoop(), openCodeMonitorLoop()])
 }
 
 async function check() {
@@ -2130,11 +2432,13 @@ async function check() {
   if (!result?.ok) throw new Error("Telegram getMe failed")
   const commandResult = await requestJson(`https://api.telegram.org/bot${token}/getMyCommands`)
   const commandNames = new Set((commandResult?.result || []).map((item) => item.command))
-  if (!["home", "sessions", "opencode", "codex", "add", "batch"].every((name) => commandNames.has(name))) throw new Error("Telegram command menu is incomplete")
+  if (!["home", "sessions", "opencode", "codex", "zcode", "add", "batch"].every((name) => commandNames.has(name))) throw new Error("Telegram command menu is incomplete")
   const sessions = await discoverSessions()
   const codexSessions = filterAgentSessions(sessions, "codex").length
-  console.log(`CHECK=PASS BOT=@${result.result.username} INSTANCES=${loadInstances().length} SESSIONS=${sessions.length} CODEX_SESSIONS=${codexSessions} COMMANDS=home,sessions,opencode,codex,add,batch`)
+  const zcodeSessions = filterAgentSessions(sessions, "zcode").length
+  console.log(`CHECK=PASS BOT=@${result.result.username} INSTANCES=${loadInstances().length} SESSIONS=${sessions.length} CODEX_SESSIONS=${codexSessions} ZCODE_SESSIONS=${zcodeSessions} COMMANDS=home,sessions,opencode,codex,zcode,add,batch`)
   await codexClient?.stop().catch(() => {})
+  await zcodeClient?.stop().catch(() => {})
 }
 
 function selfTest() {
@@ -2142,6 +2446,7 @@ function selfTest() {
   if (parseCommand("/home").name !== "home") throw new Error("parse home failed")
   if (parseCommand("/opencode").name !== "opencode") throw new Error("parse opencode failed")
   if (parseCommand("/codex").name !== "codex") throw new Error("parse codex failed")
+  if (parseCommand("/zcode").name !== "zcode") throw new Error("parse zcode failed")
   if (parseCommand("/new hub | 检查项目").arg?.alias !== "hub" || parseCommand("/new hub | 检查项目").arg?.prompt !== "检查项目") throw new Error("parse new failed")
   if (parseCommand("/new bad")?.name !== "new" || parseCommand("/new bad")?.arg !== null) throw new Error("parse invalid new failed")
   if (parseCommand("/sessions").name !== "sessions") throw new Error("parse sessions failed")
@@ -2194,7 +2499,7 @@ else {
   ensureDirectories()
   try {
     acquireLock()
-    const cleanup = async () => { await codexClient?.stop().catch(() => {}); releaseLock(); process.exit(0) }
+    const cleanup = async () => { await Promise.allSettled([codexClient?.stop(), zcodeClient?.stop()]); releaseLock(); process.exit(0) }
     process.on("SIGINT", cleanup)
     process.on("SIGTERM", cleanup)
     await main()

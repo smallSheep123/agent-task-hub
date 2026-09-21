@@ -1,4 +1,4 @@
-export const AGENT_BACKENDS = Object.freeze(["opencode", "codex"])
+export const AGENT_BACKENDS = Object.freeze(["opencode", "codex", "zcode"])
 
 export function normalizeBackend(value, fallback = null) {
   const backend = String(value || "").toLowerCase()
@@ -65,7 +65,8 @@ export function migrateSessionCollections(state, session, collectionNames = ["qu
 
 export function encodeSessionAction(action, session) {
   if (!/^[a-z]{1,12}$/.test(String(action || ""))) throw new Error("Invalid callback action")
-  const backend = normalizeBackend(session?.backend, "opencode") === "codex" ? "c" : "o"
+  const normalized = normalizeBackend(session?.backend, "opencode")
+  const backend = normalized === "codex" ? "c" : normalized === "zcode" ? "z" : "o"
   // Terminal events have both an event id and a sessionId. The event id can
   // contain the thread and turn ids and exceed Telegram's 64-byte callback
   // limit, while every session action must target the underlying session.
@@ -79,7 +80,7 @@ export function decodeSessionAction(value, expectedAction) {
   const prefix = `${expectedAction}:`
   if (!text.startsWith(prefix)) return null
   const payload = text.slice(prefix.length)
-  const modern = payload.match(/^([oc]):(.+)$/)
-  if (modern) return { backend: modern[1] === "c" ? "codex" : "opencode", id: modern[2] }
+  const modern = payload.match(/^([ocz]):(.+)$/)
+  if (modern) return { backend: modern[1] === "c" ? "codex" : modern[1] === "z" ? "zcode" : "opencode", id: modern[2] }
   return payload ? { backend: "opencode", id: payload } : null
 }

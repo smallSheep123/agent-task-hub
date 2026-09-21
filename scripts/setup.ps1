@@ -100,6 +100,10 @@ $config = [ordered]@{
     codexPollIntervalMs = 5000
     codexMonitorLimit = 100
     codexProjects = [ordered]@{}
+    zcodeBundle = ''
+    zcodePollIntervalMs = 5000
+    zcodeThoughtLevel = 'high'
+    zcodeProjects = [ordered]@{}
     configuredAt = (Get-Date).ToString('o')
 }
 $maxUpdate = ($updates | Measure-Object -Property update_id -Maximum).Maximum
@@ -115,9 +119,9 @@ $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $StatePath -Encoding
 Lock-DataRoot $DataRoot
 
 $commands = if ($Language -eq 'zh-CN') { @(
-    @{ command='home'; description='打开聚合首页' }; @{ command='sessions'; description='查看全部 Agent 会话' }; @{ command='opencode'; description='进入 OpenCode 模式' }; @{ command='codex'; description='进入 Codex 模式' }; @{ command='current'; description='查看当前选择的会话' }; @{ command='show'; description='查看当前会话进展' }; @{ command='send'; description='向当前会话继续发送指令' }; @{ command='add'; description='向当前会话队列追加一条指令' }; @{ command='batch'; description='按 --- 分隔并依次执行多条指令' }; @{ command='queue'; description='查看当前会话的自动队列' }; @{ command='help'; description='显示帮助' }
+    @{ command='home'; description='打开聚合首页' }; @{ command='sessions'; description='查看全部 Agent 会话' }; @{ command='opencode'; description='进入 OpenCode 模式' }; @{ command='codex'; description='进入 Codex 模式' }; @{ command='zcode'; description='进入 ZCode 模式' }; @{ command='current'; description='查看当前选择的会话' }; @{ command='show'; description='查看当前会话进展' }; @{ command='send'; description='向当前会话继续发送指令' }; @{ command='add'; description='向当前会话队列追加一条指令' }; @{ command='batch'; description='按 --- 分隔并依次执行多条指令' }; @{ command='queue'; description='查看当前会话的自动队列' }; @{ command='help'; description='显示帮助' }
 ) } else { @(
-    @{ command='home'; description='Open the aggregated home' }; @{ command='sessions'; description='List sessions from all agents' }; @{ command='opencode'; description='Enter OpenCode mode' }; @{ command='codex'; description='Enter Codex mode' }; @{ command='current'; description='Show the selected session' }; @{ command='show'; description='Show current session progress' }; @{ command='send'; description='Send one instruction now' }; @{ command='add'; description='Append one queued instruction' }; @{ command='batch'; description='Queue prompts separated by ---' }; @{ command='queue'; description='Show the session queue' }; @{ command='help'; description='Show command help' }
+    @{ command='home'; description='Open the aggregated home' }; @{ command='sessions'; description='List sessions from all agents' }; @{ command='opencode'; description='Enter OpenCode mode' }; @{ command='codex'; description='Enter Codex mode' }; @{ command='zcode'; description='Enter ZCode mode' }; @{ command='current'; description='Show the selected session' }; @{ command='show'; description='Show current session progress' }; @{ command='send'; description='Send one instruction now' }; @{ command='add'; description='Append one queued instruction' }; @{ command='batch'; description='Queue prompts separated by ---' }; @{ command='queue'; description='Show the session queue' }; @{ command='help'; description='Show command help' }
 ) }
 [void](Invoke-Telegram $token 'setMyCommands' @{ commands = $commands })
 [void](Invoke-Telegram $token 'sendMessage' @{ chat_id=[string]$chat.id; text=(Get-AgentHubText 'BindingComplete') })

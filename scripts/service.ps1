@@ -71,7 +71,7 @@ switch ($Action) {
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
         $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
         $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
-        Register-ScheduledTask -TaskName $TaskName -Action $taskAction -Trigger $trigger -Principal $principal -Settings $settings -Description 'Local multilingual task hub for OpenCode, Codex, and Telegram' -Force | Out-Null
+        Register-ScheduledTask -TaskName $TaskName -Action $taskAction -Trigger $trigger -Principal $principal -Settings $settings -Description 'Local multilingual task hub for OpenCode, Codex, ZCode, and Telegram' -Force | Out-Null
         Start-ScheduledTask -TaskName $TaskName
         Start-Sleep -Seconds 2
         Show-Status

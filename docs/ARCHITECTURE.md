@@ -25,10 +25,10 @@ Task controller
 Agent adapter contract
   ├─ OpenCode adapter  ← implemented
   ├─ Codex app-server  ← implemented
-  └─ future adapters
+  └─ ZCode app-server  ← implemented
 ```
 
-The controller routes OpenCode through loopback HTTP. Codex can use either a private JSONL `stdio` process or a shared official App Server over a loopback WebSocket. Telegram interaction and persistent identities are backend-aware, so both adapters share commands and queue semantics without sharing state.
+The controller routes OpenCode through loopback HTTP. Codex can use either a private JSONL `stdio` process or a shared official App Server over a loopback WebSocket. ZCode uses its desktop-bundled App Server through a private NDJSON `stdio` process. Telegram interaction and persistent identities are backend-aware, so all adapters share commands and queue semantics without sharing state.
 
 ## Adapter contract
 
@@ -50,10 +50,28 @@ Backend records carry a `backend` identifier. Queue, in-flight work, recovery, d
 ```text
 /home (aggregated notifications and health)
   ├─ OpenCode entry ── select session ── OpenCode actions
-  └─ Codex entry    ── select task    ── Codex actions
+  ├─ Codex entry    ── select task    ── Codex actions
+  └─ ZCode entry    ── select session ── ZCode actions
 ```
 
-`/sessions` is the aggregated browser. `/opencode` and `/codex` are direct entrances. Selecting an item enters its backend mode. Common commands such as `/show`, `/send`, `/add`, `/batch`, `/queue`, and `/stop` operate only on the selected session in the active mode. Notifications from every adapter remain aggregated and always show their backend.
+`/sessions` is the aggregated browser. `/opencode`, `/codex`, and `/zcode` are direct entrances. Selecting an item enters its backend mode. Common commands such as `/show`, `/send`, `/add`, `/batch`, `/queue`, and `/stop` operate only on the selected session in the active mode. Notifications from every adapter remain aggregated and always show their backend.
+
+## ZCode flow
+
+```text
+ZCode Desktop account and provider data
+              │ read and decrypt in memory
+              ▼
+Controller ── private bundled ZCode App Server (stdio NDJSON)
+               ├─ workspace/list + session/list for discovery
+               ├─ session/create or session/resume for ownership
+               ├─ session/send for prompts and queues
+               ├─ session/subscribe for live events and requests
+               ├─ session/interrupt for stop
+               └─ terminal polling for restart recovery
+```
+
+The adapter resolves the App Server bundled with ZCode Desktop and supplies both of ZCode's provider-registry paths together with the matching desktop version. Existing provider credentials remain in ZCode's own profile and are decrypted only in process memory. Newly created or resumed sessions are subscribed with ZCode's replayable transport, while polling provides deduplication and recovery when the Hub restarts. The Hub does not expose an additional listener and does not copy the credentials into its state.
 
 ## Codex flow
 
@@ -113,9 +131,9 @@ Runtime data is stored under:
 └─ logs\
 ```
 
-The installed OpenCode adapter is `%USERPROFILE%\.config\opencode\plugins\agent-task-hub.js`, and the startup task is named `Agent Task Hub`. These identifiers do not overlap the earlier bridge project.
+The installed OpenCode adapter is `%USERPROFILE%\.config\opencode\plugins\agent-task-hub.js`, and the startup task is named `Agent Task Hub`. ZCode account data remains under `%USERPROFILE%\.zcode`. These identifiers do not overlap the earlier bridge project.
 
-`config.json` stores the selected locale, Telegram identity binding, and a DPAPI-protected token. Instance records contain loopback connection metadata and a DPAPI-protected temporary OpenCode credential. `state.json` stores Telegram offsets, selected sessions, queues, recovery metadata, processed-event fingerprints, and short approval/question callback mappings.
+`config.json` stores the selected locale, Telegram identity binding, a DPAPI-protected token, approved project aliases, and optional local adapter paths. Instance records contain loopback connection metadata and a DPAPI-protected temporary OpenCode credential. `state.json` stores Telegram offsets, selected sessions, queues, recovery metadata, processed-event fingerprints, and short approval/question callback mappings. ZCode provider secrets are never persisted by the Hub.
 
 ## Queue lifecycle
 
@@ -130,7 +148,7 @@ Tasks started directly on the computer produce notifications but advance a queue
 
 ## Home dashboard
 
-The aggregated home derives active work from each adapter's live session status. For OpenCode, elapsed time starts at the first user message after the latest completed assistant message; queued work uses its persisted dispatch time. For Codex, elapsed time uses the active turn's `startedAt`, including the temporary no-`completedAt` state written by another Desktop client. The dashboard limits detail reads to three active sessions per backend and performs them concurrently.
+The aggregated home derives active work from each adapter's live session status. For OpenCode, elapsed time starts at the first user message after the latest completed assistant message; queued work uses its persisted dispatch time. For Codex, elapsed time uses the active turn's `startedAt`, including the temporary no-`completedAt` state written by another Desktop client. ZCode uses the active session cycle timestamp reported by its App Server. The dashboard limits detail reads to three active sessions per backend and performs them concurrently.
 
 Pending approval and question records are correlated by backend and session ID. They annotate the matching running conversation without changing the active Telegram agent mode. Idle and historical conversations remain in the paginated session browser.
 

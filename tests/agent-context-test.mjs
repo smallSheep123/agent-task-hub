@@ -28,13 +28,16 @@ enterGlobalMode(migrated)
 assert.equal(migrated.viewMode, "global")
 assert.equal(migrated.activeBackend, null)
 
-const sessions = [{ id: "o", backend: "opencode" }, { id: "c", backend: "codex" }]
+const sessions = [{ id: "o", backend: "opencode" }, { id: "c", backend: "codex" }, { id: "z", backend: "zcode" }]
 assert.deepEqual(filterAgentSessions(sessions, "codex").map((item) => item.id), ["c"])
-assert.equal(filterAgentSessions(sessions, "all").length, 2)
+assert.equal(filterAgentSessions(sessions, "all").length, 3)
+assert.deepEqual(filterAgentSessions(sessions, "zcode").map((item) => item.id), ["z"])
 assert.match(sessionIdentity(sessions[0]), /^opencode:/)
 assert.equal(sessionIdentity({ backend: "opencode", instanceId: "ignored", serverUrl: "http://127.0.0.1:4096", sessionId: "abc" }), "opencode:http://127.0.0.1:4096:abc")
 assert.equal(encodeSessionAction("select", { backend: "codex", id: "abc" }), "select:c:abc")
 assert.deepEqual(decodeSessionAction("select:c:abc", "select"), { backend: "codex", id: "abc" })
+assert.equal(encodeSessionAction("select", { backend: "zcode", id: "abc" }), "select:z:abc")
+assert.deepEqual(decodeSessionAction("select:z:abc", "select"), { backend: "zcode", id: "abc" })
 assert.deepEqual(decodeSessionAction("select:legacy", "select"), { backend: "opencode", id: "legacy" })
 assert.equal(decodeSessionAction("show:o:abc", "select"), null)
 const codexCompletion = {

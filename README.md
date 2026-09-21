@@ -4,26 +4,26 @@
 
 **English** · [简体中文](docs/README.zh-CN.md) · [Architecture](docs/ARCHITECTURE.md) · [Codex commands](docs/CODEX_COMMANDS.md) · [Roadmap](docs/ROADMAP.md) · [Security](SECURITY.md)
 
-Agent Task Hub is a Windows-first, multilingual Telegram control center for local coding agents. The current release supports OpenCode Desktop and Codex through one bot, with isolated sessions, queues, events, and approvals.
+Agent Task Hub is a Windows-first, multilingual Telegram control center for local coding agents. The current release supports OpenCode Desktop, Codex, and ZCode through one bot, with isolated sessions, queues, events, and approvals.
 
-> Status: OpenCode and Codex adapters are implemented. Codex supports private `stdio` and an optional shared official App Server bound only to `127.0.0.1`.
+> Status: OpenCode, Codex, and ZCode adapters are implemented. Codex supports private `stdio` and an optional shared official App Server bound only to `127.0.0.1`; ZCode uses its bundled local App Server over private `stdio`.
 
 ## What it does
 
-- Sends a Telegram message when connected OpenCode sessions or monitored Codex turns complete, fail, or are interrupted.
-- Provides one aggregated home with separate OpenCode and Codex entrances; selecting a session switches into that agent's mode.
+- Sends a Telegram message when connected OpenCode, Codex, or ZCode work completes, fails, or is interrupted.
+- Provides one aggregated home with separate OpenCode, Codex, and ZCode entrances; selecting a session switches into that agent's mode.
 - Turns the aggregated home into a live dashboard with each agent's running conversations, elapsed time, project path, queued work, and approval/question blockers.
 - Browses and searches sessions with project paths and pagination.
 - Sends prompts immediately or runs per-session sequential queues with `/add` and `/batch`.
 - Recovers queues after restarts and suppresses duplicate events and notifications.
-- Presents OpenCode approvals and choice questions from every registered local OpenCode server, plus approvals/questions from Codex turns started through the Hub, using only decisions supported by the underlying agent.
+- Presents OpenCode approvals and questions from every registered local OpenCode server, plus live approvals/questions from Codex and ZCode work started through the Hub, using only decisions supported by the underlying agent.
 - Shows session progress, recent replies, file-change summaries, queue state, and service health.
 - Keeps OpenCode access on loopback and opens no inbound network port.
 - Supports Simplified Chinese and English in setup, management, Telegram commands, buttons, and notifications.
 
 ## Quick start
 
-Requirements: Windows 10/11, Node.js 22+, a Telegram bot from [@BotFather](https://t.me/BotFather), and at least one supported local agent: OpenCode Desktop or Codex Desktop/CLI.
+Requirements: Windows 10/11, Node.js 22+, a Telegram bot from [@BotFather](https://t.me/BotFather), and at least one supported local agent: OpenCode Desktop, Codex Desktop/CLI, or ZCode Desktop.
 
 1. Download or clone this repository.
 2. Double-click `Bridge-Manager.cmd`.
@@ -38,8 +38,8 @@ Setup installs the adapter as `%USERPROFILE%\.config\opencode\plugins\agent-task
 | Command | Purpose |
 |---|---|
 | `/home` | Open the aggregated agent home |
-| `/opencode`, `/codex` | Enter an agent-specific session list |
-| `/new project_alias \| prompt` | Create and start a Codex session in an approved project |
+| `/opencode`, `/codex`, `/zcode` | Enter an agent-specific session list |
+| `/new project_alias \| prompt` | Create a session in the active Codex or ZCode mode |
 | `/sessions` or `/sessions 2` | Browse sessions from all connected agents |
 | `/find keyword` | Search session titles and project paths |
 | `/use 1` | Select a session from the current page |
@@ -51,8 +51,8 @@ Setup installs the adapter as `%USERPROFILE%\.config\opencode\plugins\agent-task
 | `/queue`, `/remove 2` | Inspect or edit waiting queue items |
 | `/pause`, `/resume`, `/clearqueue` | Control automatic queue progress |
 | `/stop` | Stop the current task after confirmation |
-| `/approvals` | Show pending OpenCode and Codex approvals |
-| `/questions`, `/answer text` | Show or answer pending OpenCode and Codex questions |
+| `/approvals` | Show pending OpenCode, Codex, and ZCode approvals |
+| `/questions`, `/answer text` | Show or answer pending OpenCode, Codex, and ZCode questions |
 | `/health`, `/status` | Show detailed or compact health information |
 
 Example:
@@ -68,11 +68,13 @@ Write a short maintenance note
 
 Each item starts after the preceding completion event. The bot reports every completion before dispatching the next item, then sends a final message when the queue is empty. Tasks started manually on the computer are reported without accidentally advancing an unrelated queue.
 
-`/new` accepts only aliases registered in `%USERPROFILE%\.config\agent-task-hub\config.json`. Example: `"codexProjects": { "hub": "D:\\AIGC\\agent-task-hub" }`.
+`/new` accepts only aliases registered in `%USERPROFILE%\.config\agent-task-hub\config.json`. Use `codexProjects` for Codex and `zcodeProjects` for ZCode. Example: `"zcodeProjects": { "hub": "D:\\AIGC\\agent-task-hub" }`.
 
 OpenCode questions are discovered independently of the selected Telegram mode. Single-choice options continue immediately, multi-choice questions have an explicit submit button, and free-text choices use `/answer text`.
 
 Codex turns started through the Hub keep their live app-server connection, so approvals and questions can be answered from Telegram. For a turn started in another Codex client, the Hub detects and aggregates its terminal completion; live approvals and questions remain in the client that owns that app-server connection.
+
+ZCode uses the App Server bundled with the installed desktop application. The adapter reads the existing ZCode account configuration at runtime, decrypts it only in memory using ZCode's own local format, and never copies provider credentials into Hub configuration, state, logs, or the repository. Sessions started through Telegram keep a live subscription for completion, approval, and question handling; polling is retained as a recovery path after restarts.
 
 ### Shared Codex backend
 
@@ -125,7 +127,10 @@ npm run check
 npm run stress
 npm run stress:codex
 npm run smoke:codex
+npm run smoke:zcode
 ```
+
+`npm run smoke:zcode` is read-only by default. Add `-- --send` to create a temporary real ZCode task, wait for its response, and verify the full dispatch path.
 
 Model-backed live suites are opt-in because they create real Codex turns. Both archive their temporary threads:
 
