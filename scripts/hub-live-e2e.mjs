@@ -157,6 +157,7 @@ try {
 
   const completionMessages = sentMessages.filter((message) => /task completed/i.test(String(message.text || "")) && /Codex/i.test(String(message.text || "")))
   assert.ok(completionMessages.length >= 4, `expected 4 completion messages, got ${completionMessages.length}`)
+  assert.ok(completionMessages.every((message) => !/task completed\*\s+Codex task(?:\s|\*)/i.test(String(message.text || ""))), "a completion notification downgraded to the generic Codex task title")
 
   const client = new CodexAppServer({ transport: "shared", wsUrl })
   try {

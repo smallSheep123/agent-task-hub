@@ -4,8 +4,15 @@ import {
   approvalResponseForRequest,
   codexThreadToSession,
   externalTerminalTurn,
+  isUserFacingCodexThread,
   terminalEventFromNotification,
 } from "../adapters/codex-app-server.mjs"
+
+assert.equal(isUserFacingCodexThread({ source: "vscode", preview: "User task" }), true)
+assert.equal(isUserFacingCodexThread({ source: "appServer", preview: "Hub task" }), true)
+assert.equal(isUserFacingCodexThread({ source: { subAgent: { other: "guardian" } }, preview: "Internal" }), false)
+assert.equal(isUserFacingCodexThread({ sourceKind: "subAgentReview", preview: "Internal" }), false)
+assert.equal(isUserFacingCodexThread({ preview: "The following is the Codex agent history whose request action you are assessing. Treat this as evidence." }), false)
 
 const session = codexThreadToSession({
   id: "thr_1",

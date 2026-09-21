@@ -6,8 +6,13 @@ import { delimiter, dirname, extname, join } from "node:path"
 import readline from "node:readline"
 
 const CODEX_INSTANCE_ID = "codex-local"
-const CODEX_SOURCE_KINDS = ["cli", "vscode", "exec", "appServer", "subAgent", "subAgentReview", "subAgentCompact", "subAgentThreadSpawn", "subAgentOther", "unknown"]
+const CODEX_SOURCE_KINDS = ["cli", "vscode", "exec", "appServer", "unknown"]
 const CODEX_TRANSPORTS = new Set(["private", "shared", "auto"])
+const INTERNAL_REVIEW_PROMPT = /^The following is the Codex agent history whose request action you are assessing\./i
+
+function isGenericThreadName(value) {
+  return !String(value || "").trim() || /^Codex task$/i.test(String(value).trim())
+}
 
 export function normalizeCodexTransport(value = "private") {
   const transport = String(value || "private").trim().toLowerCase()
@@ -104,6 +109,13 @@ export function externalTerminalTurn(thread, { threshold = 0, observedTurns = ne
 
 function titleForThread(thread) {
   return String(thread?.name || thread?.preview || "Codex task").split(/\r?\n/, 1)[0].trim().slice(0, 180) || "Codex task"
+}
+
+export function isUserFacingCodexThread(thread) {
+  const source = thread?.source
+  if (source && typeof source === "object" && source.subAgent) return false
+  if (/^subagent/i.test(String(thread?.sourceKind || source || ""))) return false
+  return !INTERNAL_REVIEW_PROMPT.test(String(thread?.name || thread?.preview || "").trim())
 }
 
 export function codexThreadToSession(thread) {
@@ -230,6 +242,7 @@ export class CodexAppServer extends EventEmitter {
     this.pending = new Map()
     this.threads = new Map()
     this.threadNames = new Map()
+    this.internalThreadIds = new Set()
     this.loadedThreads = new Set()
     this.activeTurns = new Map()
     this.latestMessages = new Map()
@@ -302,7 +315,7 @@ export class CodexAppServer extends EventEmitter {
       this.emit("exit", { code: event.code, signal: null, detail })
     })
     this.serverInfo = await this.request("initialize", {
-      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.4.1" },
+      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.4.2" },
       capabilities: { experimentalApi: true },
     }, Math.min(this.requestTimeoutMs, this.sharedConnectTimeoutMs))
     this.notify("initialized", {})
@@ -333,7 +346,7 @@ export class CodexAppServer extends EventEmitter {
     this.lines = readline.createInterface({ input: child.stdout })
     this.lines.on("line", (line) => this.#receive(line))
     this.serverInfo = await this.request("initialize", {
-      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.4.1" },
+      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.4.2" },
       capabilities: { experimentalApi: true },
     }, transport === "shared" ? Math.min(this.requestTimeoutMs, this.sharedConnectTimeoutMs) : this.requestTimeoutMs)
     this.notify("initialized", {})
@@ -457,7 +470,22 @@ export class CodexAppServer extends EventEmitter {
     const explicitName = this.threadNames.get(threadId)
     if (explicitName) remembered.name = explicitName
     this.threads.set(threadId, remembered)
+    if (!isUserFacingCodexThread(remembered)) this.internalThreadIds.add(threadId)
     return remembered
+  }
+
+  async #emitTerminal(params) {
+    const threadId = String(params.threadId || "")
+    let thread = this.threads.get(threadId)
+    if (!thread?.source && !thread?.sourceKind && !this.internalThreadIds.has(threadId)) {
+      try { thread = await this.readThread(threadId) } catch {}
+    }
+    const cachedText = this.latestMessages.get(threadId)
+    const diff = this.diffs.get(threadId)
+    this.latestMessages.delete(threadId)
+    this.diffs.delete(threadId)
+    if (this.internalThreadIds.has(threadId) || !isUserFacingCodexThread(thread)) return
+    this.emit("terminal", terminalEventFromNotification(params, thread, cachedText, diff))
   }
 
   #notification(method, params) {
@@ -475,17 +503,18 @@ export class CodexAppServer extends EventEmitter {
       const threadId = String(params.threadId)
       this.activeTurns.delete(threadId)
       if (params.turn?.id) this.observedTurns.add(String(params.turn.id))
-      const event = terminalEventFromNotification(params, this.threads.get(threadId), this.latestMessages.get(threadId), this.diffs.get(threadId))
-      this.latestMessages.delete(threadId)
-      this.diffs.delete(threadId)
-      this.emit("terminal", event)
+      void this.#emitTerminal(params).catch((error) => this.emit("diagnostic", "Codex terminal classification failed: " + error.message))
     } else if (method === "thread/name/updated" && params.threadId) {
-      this.threadNames.set(String(params.threadId), String(params.name || ""))
+      const threadId = String(params.threadId)
+      const incomingName = String(params.name || "")
+      const existingName = this.threadNames.get(threadId)
+      if (!existingName || !isGenericThreadName(incomingName)) this.threadNames.set(threadId, incomingName)
       const previous = this.threads.get(String(params.threadId)) || { id: String(params.threadId), cwd: "", turns: [] }
-      this.#rememberThread({ ...previous, name: String(params.name || "") })
+      this.#rememberThread({ ...previous, name: this.threadNames.get(threadId) || incomingName })
     } else if ((method === "thread/closed" || method === "thread/archived" || method === "thread/deleted") && params.threadId) {
       this.loadedThreads.delete(String(params.threadId))
       this.threadNames.delete(String(params.threadId))
+      this.internalThreadIds.delete(String(params.threadId))
     }
     this.emit("notification", { method, params })
   }
@@ -503,6 +532,7 @@ export class CodexAppServer extends EventEmitter {
         sourceKinds: CODEX_SOURCE_KINDS,
       }, this.listRequestTimeoutMs)
       for (const thread of response?.data || []) {
+        if (!isUserFacingCodexThread(thread)) continue
         this.#rememberThread(thread)
         sessions.push(codexThreadToSession(thread))
       }
@@ -517,6 +547,7 @@ export class CodexAppServer extends EventEmitter {
     try {
       const response = await this.request("thread/list", { limit, archived: false, sortKey: "recency_at", sortDirection: "desc", sourceKinds: CODEX_SOURCE_KINDS }, this.listRequestTimeoutMs)
       for (const listed of response?.data || []) {
+        if (!isUserFacingCodexThread(listed)) continue
         this.#rememberThread(listed)
         const threadId = String(listed.id)
         const version = unixMilliseconds(listed.updatedAt || listed.recencyAt || listed.createdAt)
@@ -641,6 +672,8 @@ export class CodexAppServer extends EventEmitter {
     this.threads.delete(String(threadId))
     this.activeTurns.delete(String(threadId))
     this.loadedThreads.delete(String(threadId))
+    this.threadNames.delete(String(threadId))
+    this.internalThreadIds.delete(String(threadId))
   }
 
   async status(threadId) {
