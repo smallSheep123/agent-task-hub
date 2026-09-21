@@ -42,6 +42,7 @@ All notable changes to this project are documented here.
 - Clear stale Telegram polling/startup errors after a successful connection, so `/health` reports the current state instead of a recovered historical failure.
 - Isolated OpenCode approval, OpenCode question, and Codex request polling failures so one unavailable interface cannot suppress the others.
 - Increased the Windows DPAPI helper startup allowance for cold CI hosts and heavily loaded desktops.
+- Clear a recovered shared Codex connection error after the adapter reconnects, so `/health` reflects the live connection.
 
 ## 0.1.0 - 2026-09-20
 

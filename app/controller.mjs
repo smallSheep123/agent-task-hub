@@ -1931,6 +1931,7 @@ async function main(options = {}) {
       if (!codexClient?.ready || !codexClient.isRunning || !codexClient.agentTaskHubAttached) {
         try {
           await attachCodexAdapter()
+          if (clearRecoveredError(state, "codex-reconnect")) saveState()
           log("INFO", "Codex app-server adapter connected")
         } catch (error) {
           recordError("codex-reconnect", error)
