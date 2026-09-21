@@ -1,18 +1,20 @@
 {
   "name": "agent-task-hub",
-  "version": "0.2.12",
+  "version": "0.3.0",
   "private": true,
   "description": "Multilingual local Telegram task hub for OpenCode and Codex.",
   "type": "module",
   "scripts": {
-    "test": "node app/controller.mjs --self-test && node tests/agent-context-test.mjs && node tests/dashboard-test.mjs && node tests/telegram-markdown-test.mjs && node tests/service-launch-test.mjs && node tests/opencode-question-test.mjs && node tests/codex-adapter-test.mjs && node tests/i18n-test.mjs && node tests/plugin-test.mjs && powershell -NoProfile -ExecutionPolicy Bypass -File tests/parse-powershell.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File tests/localization-test.ps1",
+    "test": "node app/controller.mjs --self-test && node tests/agent-context-test.mjs && node tests/dashboard-test.mjs && node tests/telegram-markdown-test.mjs && node tests/service-launch-test.mjs && node tests/opencode-question-test.mjs && node tests/codex-adapter-test.mjs && node tests/codex-transport-test.mjs && node tests/i18n-test.mjs && node tests/plugin-test.mjs && powershell -NoProfile -ExecutionPolicy Bypass -File tests/parse-powershell.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File tests/localization-test.ps1",
     "check": "node --check app/controller.mjs && node --check app/agent-context.mjs && node --check app/dashboard.mjs && node --check app/locales.mjs && node --check app/telegram-markdown.mjs && node --check adapters/opencode.js && node --check adapters/opencode-question.mjs && node --check adapters/codex-app-server.mjs",
     "stress": "node tests/stress-test.mjs",
     "stress:codex": "node tests/codex-read-stress.mjs",
-    "smoke:codex": "node tests/codex-smoke.mjs"
+    "smoke:codex": "node tests/codex-smoke.mjs",
+    "probe:codex-shared": "node scripts/codex-shared-probe.mjs",
+    "probe:codex-shared-dual": "node scripts/codex-shared-dual-probe.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "repository": {
     "type": "git",

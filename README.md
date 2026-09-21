@@ -6,7 +6,7 @@
 
 Agent Task Hub is a Windows-first, multilingual Telegram control center for local coding agents. The current release supports OpenCode Desktop and Codex through one bot, with isolated sessions, queues, events, and approvals.
 
-> Status: OpenCode and Codex adapters are implemented. Codex uses the official local `app-server` over `stdio`; no network listener is opened.
+> Status: OpenCode and Codex adapters are implemented. Codex supports private `stdio` and an optional shared official App Server bound only to `127.0.0.1`.
 
 ## What it does
 
@@ -23,7 +23,7 @@ Agent Task Hub is a Windows-first, multilingual Telegram control center for loca
 
 ## Quick start
 
-Requirements: Windows 10/11, Node.js 20+, a Telegram bot from [@BotFather](https://t.me/BotFather), and at least one supported local agent: OpenCode Desktop or Codex Desktop/CLI.
+Requirements: Windows 10/11, Node.js 22+, a Telegram bot from [@BotFather](https://t.me/BotFather), and at least one supported local agent: OpenCode Desktop or Codex Desktop/CLI.
 
 1. Download or clone this repository.
 2. Double-click `Bridge-Manager.cmd`.
@@ -70,6 +70,27 @@ OpenCode questions are discovered independently of the selected Telegram mode. S
 
 Codex turns started through the Hub keep their live app-server connection, so approvals and questions can be answered from Telegram. For a turn started in another Codex client, the Hub detects and aggregates its terminal completion; live approvals and questions remain in the client that owns that app-server connection.
 
+### Shared Codex backend
+
+Version 0.3 adds an optional shared Codex backend. It runs the official Codex App Server on `ws://127.0.0.1:9234`; Agent Task Hub and compatible Codex clients can then use the same server process and the same thread writer. The listener is loopback-only and is never exposed to the LAN or Internet.
+
+Run the compatibility probe before enabling it:
+
+```powershell
+.\bridge.ps1 -Action codex-probe -Language en-US
+.\bridge.ps1 -Action codex-shared -Language en-US
+.\bridge.ps1 -Action restart -Language en-US
+```
+
+Fully restart Codex Desktop after enabling shared mode. To return to the stable 0.2 behavior:
+
+```powershell
+.\bridge.ps1 -Action codex-private -Language en-US
+.\bridge.ps1 -Action restart -Language en-US
+```
+
+The transport setting is stored as `codexTransport` and `codexWsUrl` in the existing protected configuration directory. Shared mode uses the official standalone Codex package because the Desktop-bundled executable is not a complete daemon package.
+
 The main command menu stays small. Advanced queue, approval, and diagnostic commands remain accepted. Buttons carry the action, backend, and session identity, so changing modes does not require repeatedly typing identifiers.
 
 The home dashboard lists up to three running conversations per agent and adds direct session buttons for the busiest items. Use **Refresh** to recalculate elapsed time and current blockers; use **All sessions** for history and idle conversations.
@@ -83,6 +104,9 @@ Use `Bridge-Manager.cmd`, or run the commands below in PowerShell:
 .\bridge.ps1 -Action doctor -Language en-US
 .\bridge.ps1 -Action restart -Language en-US
 .\bridge.ps1 -Action install-plugin -Language en-US
+.\bridge.ps1 -Action codex-probe -Language en-US
+.\bridge.ps1 -Action codex-shared -Language en-US
+.\bridge.ps1 -Action codex-private -Language en-US
 ```
 
 Use `zh-CN`, `en-US`, or `auto`. The interactive manager stores the preference at `%USERPROFILE%\.config\agent-task-hub\ui.json`.

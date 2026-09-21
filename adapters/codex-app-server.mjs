@@ -6,6 +6,12 @@ import { delimiter, dirname, extname, join } from "node:path"
 import readline from "node:readline"
 
 const CODEX_INSTANCE_ID = "codex-local"
+const CODEX_TRANSPORTS = new Set(["private", "shared", "auto"])
+
+export function normalizeCodexTransport(value = "private") {
+  const transport = String(value || "private").trim().toLowerCase()
+  return CODEX_TRANSPORTS.has(transport) ? transport : "private"
+}
 
 function executableCandidates(command) {
   if (/[\\/]/.test(command)) return [command]
@@ -27,12 +33,14 @@ function desktopCodexExecutable() {
   }
 }
 
-export function resolveCodexLaunch(command = "codex") {
+export function resolveCodexLaunch(command = "codex", transport = "private") {
+  const selectedTransport = normalizeCodexTransport(transport) === "shared" ? "shared" : "private"
+  const appServerArgs = selectedTransport === "shared" ? ["app-server", "proxy"] : ["app-server", "--stdio"]
   const requested = String(command || "codex")
   const desktop = requested.toLowerCase() === "codex" ? desktopCodexExecutable() : null
-  if (desktop) return { command: desktop, args: ["app-server", "--stdio"] }
+  if (desktop) return { command: desktop, args: appServerArgs, transport: selectedTransport }
   const resolved = executableCandidates(requested).find((candidate) => existsSync(candidate)) || requested
-  if (process.platform !== "win32") return { command: resolved, args: ["app-server", "--stdio"] }
+  if (process.platform !== "win32") return { command: resolved, args: appServerArgs, transport: selectedTransport }
   const extension = extname(resolved).toLowerCase()
   if ([".ps1", ".cmd", ".bat"].includes(extension)) {
     const target = process.arch === "arm64" ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc"
@@ -43,12 +51,13 @@ export function resolveCodexLaunch(command = "codex") {
       join(npmRoot, "node_modules", "@openai", "codex", "vendor", target, "bin", "codex.exe"),
     ]
     const native = nativeCandidates.find((candidate) => existsSync(candidate))
-    if (native) return { command: native, args: ["app-server", "--stdio"] }
+    if (native) return { command: native, args: appServerArgs, transport: selectedTransport }
   }
   if (extension === ".ps1") {
     return {
       command: "powershell.exe",
-      args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", resolved, "app-server", "--stdio"],
+      args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", resolved, ...appServerArgs],
+      transport: selectedTransport,
     }
   }
   if (extension === ".cmd" || extension === ".bat") {
@@ -56,13 +65,14 @@ export function resolveCodexLaunch(command = "codex") {
     if (existsSync(script)) {
       return {
         command: "powershell.exe",
-        args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "app-server", "--stdio"],
+        args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, ...appServerArgs],
+        transport: selectedTransport,
       }
     }
     const safe = resolved.replaceAll("%", "%%").replaceAll('"', '""')
-    return { command: process.env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", '"' + safe + '" app-server --stdio'] }
+    return { command: process.env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", '"' + safe + '" ' + appServerArgs.join(" ")], transport: selectedTransport }
   }
-  return { command: resolved, args: ["app-server", "--stdio"] }
+  return { command: resolved, args: appServerArgs, transport: selectedTransport }
 }
 
 function statusText(status) {
@@ -191,13 +201,27 @@ export function approvalResponseForRequest(method, params, action) {
 }
 
 export class CodexAppServer extends EventEmitter {
-  constructor({ command = process.env.AGENT_TASK_HUB_CODEX_COMMAND || "codex", requestTimeoutMs = 20000, spawnFactory = spawn } = {}) {
+  constructor({
+    command = process.env.AGENT_TASK_HUB_CODEX_COMMAND || "codex",
+    transport = process.env.AGENT_TASK_HUB_CODEX_TRANSPORT || "private",
+    wsUrl = process.env.AGENT_TASK_HUB_CODEX_WS_URL || "",
+    requestTimeoutMs = 20000,
+    sharedConnectTimeoutMs = 5000,
+    spawnFactory = spawn,
+    webSocketFactory = null,
+  } = {}) {
     super()
     this.command = command
+    this.requestedTransport = normalizeCodexTransport(transport)
+    this.transport = null
+    this.wsUrl = String(wsUrl || "").trim()
     this.connectionId = randomUUID()
     this.requestTimeoutMs = requestTimeoutMs
+    this.sharedConnectTimeoutMs = sharedConnectTimeoutMs
     this.spawnFactory = spawnFactory
+    this.webSocketFactory = webSocketFactory
     this.process = null
+    this.socket = null
     this.lines = null
     this.nextId = 1
     this.pending = new Map()
@@ -214,41 +238,129 @@ export class CodexAppServer extends EventEmitter {
     this.ready = false
     this.stopping = false
     this.stderr = ""
+    this.expectedExits = new WeakSet()
+    this.expectedSocketCloses = new WeakSet()
   }
 
   get isRunning() {
+    if (this.socket) return this.socket.readyState === 1
     return Boolean(this.process && this.process.exitCode === null && !this.process.killed)
   }
 
   async start() {
     if (this.ready && this.isRunning) return this
     this.stopping = false
-    const launch = resolveCodexLaunch(this.command)
-    this.process = this.spawnFactory(launch.command, launch.args, {
+    const attempts = this.requestedTransport === "auto" ? ["shared", "private"] : [this.requestedTransport]
+    let lastError = null
+    for (const transport of attempts) {
+      try {
+        if (transport === "shared" && this.wsUrl) await this.#startWebSocket()
+        else await this.#startTransport(transport)
+        return this
+      } catch (error) {
+        lastError = error
+        await this.#discardConnection(error)
+        if (this.requestedTransport === "auto" && transport === "shared") {
+          this.emit("diagnostic", "Shared Codex app-server unavailable; falling back to private stdio: " + error.message)
+        }
+      }
+    }
+    throw lastError || new Error("Codex app-server failed to start")
+  }
+
+  async #startWebSocket() {
+    if (!/^ws:\/\/127\.0\.0\.1:\d+(?:\/.*)?$/i.test(this.wsUrl) && !/^ws:\/\/localhost:\d+(?:\/.*)?$/i.test(this.wsUrl)) {
+      throw new Error("Shared Codex WebSocket must use a loopback ws:// URL")
+    }
+    const factory = this.webSocketFactory || ((url) => {
+      if (typeof WebSocket !== "function") throw new Error("This Node.js runtime does not provide WebSocket support")
+      return new WebSocket(url)
+    })
+    const socket = factory(this.wsUrl)
+    this.socket = socket
+    this.transport = "shared-websocket"
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Shared Codex WebSocket connection timed out")), this.sharedConnectTimeoutMs)
+      const opened = () => { clearTimeout(timer); resolve() }
+      const failed = () => { clearTimeout(timer); reject(new Error("Shared Codex WebSocket connection failed")) }
+      socket.addEventListener("open", opened, { once: true })
+      socket.addEventListener("error", failed, { once: true })
+    })
+    socket.addEventListener("message", (event) => this.#receive(String(event.data)))
+    socket.addEventListener("error", () => {
+      if (!this.expectedSocketCloses.has(socket) && this.socket === socket) this.emit("diagnostic", "Shared Codex WebSocket transport error")
+    })
+    socket.addEventListener("close", (event) => {
+      if (this.stopping || this.expectedSocketCloses.has(socket) || this.socket !== socket) return
+      const detail = String(event.reason || "")
+      this.#fail(new Error(`Shared Codex WebSocket closed (code=${event.code})${detail ? ": " + detail : ""}`))
+      this.emit("exit", { code: event.code, signal: null, detail })
+    })
+    this.serverInfo = await this.request("initialize", {
+      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.3.0" },
+      capabilities: { experimentalApi: true },
+    }, Math.min(this.requestTimeoutMs, this.sharedConnectTimeoutMs))
+    this.notify("initialized", {})
+    this.ready = true
+  }
+
+  async #startTransport(transport) {
+    const launch = resolveCodexLaunch(this.command, transport)
+    const child = this.spawnFactory(launch.command, launch.args, {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       env: { ...process.env },
     })
-    this.process.on("error", (error) => this.#fail(error))
-    this.process.on("exit", (code, signal) => {
-      if (this.stopping) return
+    this.process = child
+    this.transport = launch.transport
+    this.stderr = ""
+    child.on("error", (error) => this.#fail(error))
+    child.on("exit", (code, signal) => {
+      if (this.stopping || this.expectedExits.has(child) || this.process !== child) return
       const detail = this.stderr.trim()
       this.#fail(new Error("Codex app-server exited (code=" + code + ", signal=" + signal + ")" + (detail ? ": " + detail.slice(-1000) : "")))
       this.emit("exit", { code, signal, detail })
     })
-    this.process.stderr.on("data", (chunk) => {
+    child.stderr.on("data", (chunk) => {
       this.stderr = (this.stderr + chunk).slice(-8000)
       this.emit("diagnostic", String(chunk).trim())
     })
-    this.lines = readline.createInterface({ input: this.process.stdout })
+    this.lines = readline.createInterface({ input: child.stdout })
     this.lines.on("line", (line) => this.#receive(line))
     this.serverInfo = await this.request("initialize", {
-      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.2.4" },
+      clientInfo: { name: "agent-task-hub", title: "Agent Task Hub", version: "0.3.0" },
       capabilities: { experimentalApi: true },
-    })
+    }, transport === "shared" ? Math.min(this.requestTimeoutMs, this.sharedConnectTimeoutMs) : this.requestTimeoutMs)
     this.notify("initialized", {})
     this.ready = true
-    return this
+  }
+
+  async #discardProcess(error = new Error("Codex app-server connection closed")) {
+    const child = this.process
+    if (!child) return
+    this.expectedExits.add(child)
+    this.#fail(error)
+    this.lines?.close()
+    this.lines = null
+    child.stdin?.end()
+    this.process = null
+    this.transport = null
+    if (child.exitCode === null && !child.killed) child.kill()
+  }
+
+  async #discardSocket(error = new Error("Codex app-server connection closed")) {
+    const socket = this.socket
+    if (!socket) return
+    this.expectedSocketCloses.add(socket)
+    this.#fail(error)
+    this.socket = null
+    this.transport = null
+    if (socket.readyState === 0 || socket.readyState === 1) socket.close(1000, "Agent Task Hub disconnecting")
+  }
+
+  async #discardConnection(error = new Error("Codex app-server connection closed")) {
+    await this.#discardSocket(error)
+    await this.#discardProcess(error)
   }
 
   async stop() {
@@ -256,13 +368,8 @@ export class CodexAppServer extends EventEmitter {
     this.ready = false
     if (this.monitorTimer) clearInterval(this.monitorTimer)
     this.monitorTimer = null
-    if (!this.process) return
-    this.#fail(new Error("Codex app-server stopped"))
-    this.lines?.close()
-    this.process.stdin?.end()
-    const child = this.process
-    this.process = null
-    if (child.exitCode === null && !child.killed) child.kill()
+    if (!this.process && !this.socket) return
+    await this.#discardConnection(new Error("Codex app-server stopped"))
   }
 
   #fail(error) {
@@ -275,8 +382,16 @@ export class CodexAppServer extends EventEmitter {
   }
 
   #write(message) {
-    if (!this.process?.stdin?.writable) throw new Error("Codex app-server is not running")
-    this.process.stdin.write(JSON.stringify(message) + "\n")
+    const serialized = JSON.stringify(message)
+    if (this.socket?.readyState === 1) {
+      this.socket.send(serialized)
+      return
+    }
+    if (this.process?.stdin?.writable) {
+      this.process.stdin.write(serialized + "\n")
+      return
+    }
+    throw new Error("Codex app-server is not running")
   }
 
   notify(method, params = {}) {

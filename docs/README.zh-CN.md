@@ -4,7 +4,7 @@
 
 Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控制中心。当前版本已经通过一个机器人支持 OpenCode Desktop 和 Codex，并隔离各自的会话、队列、事件与审批。
 
-> 当前状态：OpenCode 与 Codex 适配器均已实现。Codex 使用官方本机 `app-server` 的 `stdio` 通信，不开放网络监听端口。
+> 当前状态：OpenCode 与 Codex 适配器均已实现。Codex 支持私有 `stdio`，也可以选择只绑定 `127.0.0.1` 的官方共享 App Server。
 
 ## 已有能力
 
@@ -21,7 +21,7 @@ Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控�
 
 ## 快速开始
 
-需要 Windows 10/11、Node.js 20 或更新版本、通过 [@BotFather](https://t.me/BotFather) 创建的 Telegram Bot，以及至少一个本机 Agent：OpenCode Desktop 或 Codex Desktop/CLI。
+需要 Windows 10/11、Node.js 22 或更新版本、通过 [@BotFather](https://t.me/BotFather) 创建的 Telegram Bot，以及至少一个本机 Agent：OpenCode Desktop 或 Codex Desktop/CLI。
 
 1. 下载或克隆本仓库。
 2. 双击 `Bridge-Manager.cmd`。
@@ -72,6 +72,27 @@ OpenCode 提问不受 Telegram 当前 Agent 模式影响：单选点击后直接
 
 由 Hub 发起的 Codex 任务保持实时 app-server 连接，因此可以在 Telegram 处理审批和提问。若任务从另一个 Codex 客户端发起，Hub 会检测并聚合最终完成通知；运行中的审批和提问仍由持有该 app-server 连接的客户端处理。
 
+### Codex 共享后端
+
+0.3 版本新增可选的 Codex 共享后端。它在 `ws://127.0.0.1:9234` 运行官方 Codex App Server，让 Agent Task Hub 和兼容的 Codex 客户端连接同一个服务进程，共用同一个会话 writer。监听地址仅限本机回环，不会暴露到局域网或公网。
+
+启用前先运行兼容性探测：
+
+```powershell
+.\bridge.ps1 -Action codex-probe -Language zh-CN
+.\bridge.ps1 -Action codex-shared -Language zh-CN
+.\bridge.ps1 -Action restart -Language zh-CN
+```
+
+启用后需要完全退出并重新打开 Codex Desktop。需要恢复 0.2 版本的稳定连接方式时执行：
+
+```powershell
+.\bridge.ps1 -Action codex-private -Language zh-CN
+.\bridge.ps1 -Action restart -Language zh-CN
+```
+
+连接方式保存在现有受保护配置目录的 `codexTransport` 与 `codexWsUrl` 字段中。共享模式使用官方 standalone Codex 完整包；Desktop 自带的单个可执行文件不包含完整 daemon 包。
+
 ## 管理
 
 平时双击 `Bridge-Manager.cmd` 即可，也可以在 PowerShell 中执行：
@@ -81,6 +102,9 @@ OpenCode 提问不受 Telegram 当前 Agent 模式影响：单选点击后直接
 .\bridge.ps1 -Action doctor -Language zh-CN
 .\bridge.ps1 -Action restart -Language zh-CN
 .\bridge.ps1 -Action install-plugin -Language zh-CN
+.\bridge.ps1 -Action codex-probe -Language zh-CN
+.\bridge.ps1 -Action codex-shared -Language zh-CN
+.\bridge.ps1 -Action codex-private -Language zh-CN
 ```
 
 语言可设为 `zh-CN`、`en-US` 或 `auto`。交互管理器会把偏好保存到 `%USERPROFILE%\.config\agent-task-hub\ui.json`。

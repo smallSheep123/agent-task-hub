@@ -2,7 +2,7 @@
 
 **English** · [简体中文](CODEX_COMMANDS.zh-CN.md) · [Home](../README.md) · [Roadmap](ROADMAP.md)
 
-> Status: the core Codex adapter is implemented over the official local `app-server` `stdio` interface. `/codex` browses, selects, inspects, and controls existing tasks.
+> Status: the core Codex adapter supports the official local App Server over private `stdio` or a shared loopback WebSocket. `/codex` browses, selects, inspects, and controls existing tasks.
 
 ## Final interaction model
 
@@ -63,13 +63,13 @@ Persistent state uses a backend-aware identity. The current implementation separ
 
 Buttons expose only decisions returned by app-server, such as allow once, allow for session, reject, and cancel. The Hub does not invent a permanent allow-all decision. Codex user-input requests appear as separate notifications with option buttons and `/answer` support.
 
-These live requests are available for Codex turns started through the Hub. A turn started in another Codex client still produces a terminal notification here, while its approval or question remains in the client that owns that app-server connection.
+In private mode, these live requests are available for Codex turns started through the Hub. In shared mode, Desktop and the Hub use the same App Server writer, so the Hub can receive live approvals, questions, and completion events from work on that server.
 
 - `/new` accepts only locally registered project aliases.
 - Telegram never exposes a shell or arbitrary PowerShell execution.
 - Stop, queue clearing, and future archive actions require confirmation.
 - Every update must match private chat, bound Telegram user ID, and bound chat ID.
-- Codex App Server uses local `stdio`; the Hub opens no public port.
+- Private mode uses local `stdio`. Shared mode binds the official App Server only to `127.0.0.1`; the Hub opens no LAN or public port.
 
 ## Delivery order
 

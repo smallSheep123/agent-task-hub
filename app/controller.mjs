@@ -27,13 +27,20 @@ let codexClient = null
 let codexStartPromise = null
 let codexLastError = null
 let codexRetryAfter = 0
+let codexDefaultCommand = process.env.AGENT_TASK_HUB_CODEX_COMMAND || "codex"
+let codexDefaultTransport = process.env.AGENT_TASK_HUB_CODEX_TRANSPORT || "private"
+let codexDefaultWsUrl = process.env.AGENT_TASK_HUB_CODEX_WS_URL || ""
 
-async function ensureCodexClient(command = null) {
+async function ensureCodexClient(command = null, transport = null) {
   if (codexClient?.ready && codexClient.isRunning) return codexClient
   if (codexStartPromise) return codexStartPromise
   if (Date.now() < codexRetryAfter && codexLastError) throw codexLastError
   codexStartPromise = (async () => {
-    const client = new CodexAppServer({ command: command || process.env.AGENT_TASK_HUB_CODEX_COMMAND || "codex" })
+    const client = new CodexAppServer({
+      command: command || codexDefaultCommand,
+      transport: transport || codexDefaultTransport,
+      wsUrl: codexDefaultWsUrl,
+    })
     try {
       await client.start()
       codexClient = client
@@ -459,6 +466,9 @@ async function main(options = {}) {
   ensureDirectories()
   if (!existsSync(configPath)) throw new Error(`Not configured: ${configPath}`)
   const config = readJson(configPath)
+  codexDefaultCommand = config.codexCommand || process.env.AGENT_TASK_HUB_CODEX_COMMAND || "codex"
+  codexDefaultTransport = config.codexTransport || process.env.AGENT_TASK_HUB_CODEX_TRANSPORT || "private"
+  codexDefaultWsUrl = config.codexWsUrl || process.env.AGENT_TASK_HUB_CODEX_WS_URL || ""
   if (!config?.allowedUserId || !config?.allowedChatId || !config?.botTokenProtected) throw new Error("Incomplete Agent Task Hub configuration")
   i18n = createI18n(config.language || "en-US")
   const botToken = decryptToken()
@@ -1159,7 +1169,9 @@ async function main(options = {}) {
     const approvals = Object.values(state.permissionRequests).filter((item) => !item.resolvedAt).length
       + Object.values(state.openCodeQuestions).filter((item) => !item.resolvedAt).length
       + Object.values(state.codexRequests).filter((item) => !item.resolvedAt).length
-    const codex = codexClient?.ready && codexClient.isRunning ? t("online") : t("offline")
+    const codex = codexClient?.ready && codexClient.isRunning
+      ? `${t("online")} · ${t(String(codexClient.transport || "").startsWith("shared") ? "codexShared" : "codexPrivate")}`
+      : t("offline")
     return compact(t("health", openCode, codex, instances.length, sessions.length, state.selected?.title || t("notSelected"), approvals, running, waiting, paused, durationText(startedAt), lastError))
   }
 
@@ -1395,7 +1407,12 @@ async function main(options = {}) {
     if (command.name === "home") return commandHome()
     if (command.name === "opencode") return commandAgent("opencode")
     if (command.name === "codex") return commandAgent("codex")
-    if (command.name === "status") return send(t("status", loadInstances().length, codexClient?.ready && codexClient.isRunning ? t("online") : t("offline"), modeText(), state.selected ? `${backendText(state.selected.backend)} · ${state.selected.title}` : t("notSelected")))
+    if (command.name === "status") {
+      const codexStatus = codexClient?.ready && codexClient.isRunning
+        ? `${t("online")} · ${t(String(codexClient.transport || "").startsWith("shared") ? "codexShared" : "codexPrivate")}`
+        : t("offline")
+      return send(t("status", loadInstances().length, codexStatus, modeText(), state.selected ? `${backendText(state.selected.backend)} · ${state.selected.title}` : t("notSelected")))
+    }
     if (command.name === "health") return send(await healthText())
     if (command.name === "approvals") {
       await refreshPermissions()

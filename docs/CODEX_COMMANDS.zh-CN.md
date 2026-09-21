@@ -2,7 +2,7 @@
 
 [English](CODEX_COMMANDS.md) · **简体中文** · [项目首页](README.zh-CN.md) · [开发路线](ROADMAP.md)
 
-> 状态：Codex 核心适配器已经实现，使用官方 `app-server` 的本机 `stdio` 接口。`/codex` 可浏览、选择、查看和控制现有任务。
+> 状态：Codex 核心适配器已经实现，支持官方 App Server 的私有 `stdio` 或本机回环共享 WebSocket。`/codex` 可浏览、选择、查看和控制现有任务。
 
 ## 最终交互
 
@@ -63,13 +63,13 @@ Codex 提问已经实现；其他独有能力放在后续阶段：
 
 审批按钮只显示 app-server 明确提供的决定，例如“仅允许这次”“本会话持续允许”“拒绝”和“取消任务”，不创造“全部永久放行”。Codex 提问会作为单独通知显示选项，也可以用 `/answer` 回复自由文本。
 
-这些实时请求适用于由 Hub 发起的 Codex 任务。若任务从另一个 Codex 客户端发起，Hub 仍会发送最终完成通知，但审批或提问会留在持有该 app-server 连接的原客户端中。
+私有模式下，这些实时请求适用于由 Hub 发起的 Codex 任务。共享模式下，Desktop 与 Hub 使用同一个 App Server writer，因此 Hub 可以接收该服务上任务的实时审批、提问与完成事件。
 
 - `/new` 只接受本机配置中登记的项目别名。
 - 不提供 Telegram `/shell` 或任意 PowerShell 命令。
 - `/stop`、`/clearqueue` 和未来的归档操作需要确认。
 - 每个更新都校验私聊、Telegram 用户 ID 和聊天 ID。
-- Codex App Server 通过本机 `stdio` 连接，不开放公网端口。
+- 私有模式通过本机 `stdio` 连接；共享模式只绑定 `127.0.0.1`，不开放局域网或公网端口。
 
 ## 实现顺序
 

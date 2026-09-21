@@ -28,7 +28,7 @@ Agent adapter contract
   └─ future adapters
 ```
 
-The controller routes OpenCode through loopback HTTP and Codex through a persistent local JSONL `stdio` process. Telegram interaction and persistent identities are backend-aware, so both adapters share commands and queue semantics without sharing state.
+The controller routes OpenCode through loopback HTTP. Codex can use either a private JSONL `stdio` process or a shared official App Server over a loopback WebSocket. Telegram interaction and persistent identities are backend-aware, so both adapters share commands and queue semantics without sharing state.
 
 ## Adapter contract
 
@@ -58,8 +58,10 @@ Backend records carry a `backend` identifier. Queue, in-flight work, recovery, d
 ## Codex flow
 
 ```text
-Controller
-  └─ local Codex app-server process (stdio JSONL)
+Codex Desktop ─┐
+               ├─ optional shared official app-server (ws://127.0.0.1:9234)
+Controller ────┘
+  └─ private app-server process (stdio JSONL) remains the rollback mode
        ├─ thread/list + thread/read for discovery and inspection
        ├─ thread/resume + turn/start for prompts and queues
        ├─ turn/interrupt for stop
@@ -67,7 +69,9 @@ Controller
        └─ server requests for approvals and user input
 ```
 
-The adapter prefers the Codex Desktop bundled executable on Windows and falls back to a CLI installation. It never starts a WebSocket listener. A five-second metadata poll detects terminal turns written by another local Codex client; the live event stream handles turns started through the Hub. The first poll establishes a baseline, so historical turns are not reported as new completions. Approval and user-input requests are connection-scoped: the Hub can answer them for turns it starts, while a turn started in another Codex client keeps its live requests in that originating client.
+The adapter prefers the Codex Desktop bundled executable for private mode. Shared mode connects to an official standalone Codex App Server supervised by a dedicated Windows scheduled task. The WebSocket is restricted to IPv4 loopback. A five-second metadata poll detects terminal turns written by another local Codex client; the live event stream handles turns started through the Hub. The first poll establishes a baseline, so historical turns are not reported as new completions. When Desktop and the Hub use the shared server, they no longer create competing per-thread writers and the Hub receives live requests for turns on that server.
+
+`codexTransport` accepts `private`, `shared`, or `auto`. `private` preserves the 0.2 behavior. `shared` uses `codexWsUrl` when configured and otherwise uses the official `app-server proxy` control socket. `auto` attempts the shared route and falls back to private stdio without changing persisted queue state.
 
 ## Current OpenCode flow
 
@@ -88,7 +92,7 @@ Windows Task Scheduler
   └─ starts the proxy-aware PowerShell launcher at logon
 ```
 
-The OpenCode adapter never reads the Telegram token. The controller never listens on a TCP port. OpenCode registrations use an ACL-restricted local directory, while Codex communication stays inside the controller's child-process pipes.
+The OpenCode adapter never reads the Telegram token. OpenCode registrations use an ACL-restricted local directory. Private Codex communication stays inside child-process pipes; shared Codex communication is limited to a loopback-only WebSocket owned by the current Windows user.
 
 OpenCode terminal events normally arrive through the plugin. The controller also polls session metadata and status every five seconds, establishing a startup baseline before emitting anything. This catches short API-started tasks and Desktop versions that omit the plugin terminal callback; the shared event fingerprinting prevents duplicate Telegram notifications.
 
@@ -137,4 +141,4 @@ Pending approval and question records are correlated by backend and session ID. 
 - The adapter and controller run as the interactive Windows user.
 - Secrets are protected with Windows DPAPI and directory ACLs.
 - Approval callbacks contain opaque local tokens; the controller rechecks identity before submitting a decision.
-- No component exposes a network server or a general shell command through Telegram.
+- No component exposes a LAN/public listener or a general shell command through Telegram. The optional shared Codex listener binds only to `127.0.0.1`.
