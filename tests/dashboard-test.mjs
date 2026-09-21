@@ -1,9 +1,21 @@
 import assert from "node:assert/strict"
-import { codexTaskStartedAt, codexThreadAppearsActive, isRunningStatus, openCodeTaskStartedAt, pendingBreakdown, timestampMilliseconds } from "../app/dashboard.mjs"
+import { codexTaskStartedAt, codexThreadAppearsActive, elapsedDurationParts, isRunningStatus, openCodeTaskStartedAt, pendingBreakdown, timestampMilliseconds } from "../app/dashboard.mjs"
 
 assert.equal(timestampMilliseconds(1700000000), 1700000000000)
 assert.equal(timestampMilliseconds(1700000000000), 1700000000000)
 assert.equal(timestampMilliseconds(null), 0)
+assert.equal(timestampMilliseconds(undefined), 0)
+assert.equal(timestampMilliseconds(""), 0)
+assert.equal(timestampMilliseconds(0), 0)
+assert.equal(timestampMilliseconds("2026-09-21T12:00:00.000Z"), 1789992000000)
+assert.equal(elapsedDurationParts(null, 1700000000000), null)
+assert.deepEqual(elapsedDurationParts(1700000000000, 1700093784000), {
+  days: 1,
+  hours: 2,
+  minutes: 3,
+  seconds: 4,
+  totalSeconds: 93784,
+})
 assert.equal(isRunningStatus("busy"), true)
 assert.equal(isRunningStatus({ type: "inProgress" }), true)
 assert.equal(isRunningStatus("retry"), true)

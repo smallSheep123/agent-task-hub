@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { createI18n } from "./locales.mjs"
 import { decodeSessionAction, encodeSessionAction, enterAgentMode, enterGlobalMode, filterAgentSessions, initializeAgentContext, migrateSessionCollections, selectAgentSession, sessionIdentity } from "./agent-context.mjs"
-import { codexTaskStartedAt, codexThreadAppearsActive, isRunningStatus, openCodeTaskStartedAt } from "./dashboard.mjs"
+import { codexTaskStartedAt, codexThreadAppearsActive, elapsedDurationParts, isRunningStatus, openCodeTaskStartedAt, timestampMilliseconds } from "./dashboard.mjs"
 import { telegramMarkdownBody } from "./telegram-markdown.mjs"
 import { approvalOptionsForRequest, approvalResponseForRequest, CodexAppServer, terminalEventFromNotification } from "../adapters/codex-app-server.mjs"
 import { chooseOpenCodeQuestionOption, completeOpenCodeQuestion, nextOpenCodeQuestionIndex, normalizeOpenCodeQuestion, openCodeQuestionAnswers, openCodeQuestionToken, submitOpenCodeQuestion } from "../adapters/opencode-question.mjs"
@@ -260,12 +260,12 @@ function permissionDetails(request) {
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)) }
 
 function durationText(start, end = Date.now()) {
-  const elapsed = Math.max(0, end - Date.parse(start || 0))
-  const seconds = Math.round(elapsed / 1000)
-  if (seconds < 60) return t("seconds", seconds)
-  const minutes = Math.floor(seconds / 60)
-  const rest = seconds % 60
-  return rest ? t("minuteSeconds", minutes, rest) : t("minutes", minutes)
+  const duration = elapsedDurationParts(start, end)
+  if (!duration) return t("unknownDuration")
+  if (duration.days) return t("dayHourMinuteSeconds", duration.days, duration.hours, duration.minutes, duration.seconds)
+  if (duration.hours) return t("hourMinuteSeconds", duration.hours, duration.minutes, duration.seconds)
+  if (duration.minutes) return t("minuteSeconds", duration.minutes, duration.seconds)
+  return t("seconds", duration.seconds)
 }
 
 function eventFingerprint(event) {
@@ -1249,8 +1249,8 @@ async function main(options = {}) {
   async function taskStartedAt(session) {
     const key = migrateSessionState(session)
     const queued = state.queueInFlight[key]
-    const queuedAt = Date.parse(queued?.dispatchedAt || queued?.sentAt || 0)
-    if (Number.isFinite(queuedAt) && queuedAt > 0) return queuedAt
+    const queuedAt = timestampMilliseconds(queued?.dispatchedAt || queued?.sentAt)
+    if (queuedAt > 0) return queuedAt
     if (Number(session.dashboardStartedAt) > 0) return Number(session.dashboardStartedAt)
     try {
       if ((session.backend || "opencode") === "codex") {

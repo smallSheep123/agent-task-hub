@@ -6,6 +6,7 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- Fixed dashboard task timers treating an absent queue timestamp as `2000-01-01`, which produced multi-million-minute runtimes; running time now starts from the current prompt/turn and supports day, hour, minute, and second precision.
 - Excluded Codex internal guardian and other sub-agent threads from session lists, dashboards, and completion notifications.
 - Kept Telegram and Codex commands available while the initial Codex session-list baseline is still loading.
 - Allowed up to 60 seconds for large Codex history lists without weakening the timeout for ordinary requests.

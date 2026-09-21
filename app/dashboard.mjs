@@ -1,7 +1,26 @@
 export function timestampMilliseconds(value) {
-  let number = Number(value || 0)
+  if (value === null || value === undefined || value === "") return 0
+  let number = Number(value)
+  if (!Number.isFinite(number)) {
+    const parsed = Date.parse(String(value))
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0
+  }
   if (number > 0 && number < 1e12) number *= 1000
   return Number.isFinite(number) && number > 0 ? number : 0
+}
+
+export function elapsedDurationParts(start, end = Date.now()) {
+  const startMs = timestampMilliseconds(start)
+  const endMs = timestampMilliseconds(end)
+  if (!startMs || !endMs) return null
+  const totalSeconds = Math.max(0, Math.floor((endMs - startMs) / 1000))
+  return {
+    days: Math.floor(totalSeconds / 86400),
+    hours: Math.floor((totalSeconds % 86400) / 3600),
+    minutes: Math.floor((totalSeconds % 3600) / 60),
+    seconds: totalSeconds % 60,
+    totalSeconds,
+  }
 }
 
 export function isRunningStatus(status) {
