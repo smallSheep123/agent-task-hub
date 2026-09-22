@@ -82,6 +82,7 @@ class FakeWebSocket {
   constructor() {
     this.readyState = 0
     this.listeners = new Map()
+    this.methods = []
     queueMicrotask(() => {
       this.readyState = 1
       this.emit("open", {})
@@ -108,9 +109,10 @@ class FakeWebSocket {
   send(serialized) {
     const request = JSON.parse(serialized)
     if (request.id === undefined) return
-    if (request.method === "thread/list") return
+    this.methods.push(request.method)
     const result = request.method === "initialize" ? { serverInfo: { name: "fake-ws" } }
-      : request.method === "thread/start" ? { thread: { id: "thr_live", cwd: request.params.cwd, turns: [] } }
+      : request.method === "thread/list" ? { data: [], nextCursor: null }
+        : request.method === "thread/start" ? { thread: { id: "thr_live", cwd: request.params.cwd, turns: [] } }
         : request.method === "thread/resume" ? { thread: { id: request.params.threadId, turns: request.params.threadId === "thr_busy" ? [{ id: "turn_existing", status: "inProgress" }] : [] } }
           : request.method === "thread/read" ? { thread: { id: request.params.threadId, turns: [{ id: "turn_live", status: "inProgress" }] } }
             : request.method === "turn/start" ? { turn: { id: "turn_live", status: "inProgress", items: [] } }
@@ -164,8 +166,12 @@ await assert.rejects(
 )
 assert.equal(await websocketClient.steer(started.id, "more"), "turn_live")
 const monitorStartedAt = Date.now()
+websocketClient.deferBackgroundPoll(5000)
 await websocketClient.startMonitor({ intervalMs: 2000, limit: 20 })
 assert.ok(Date.now() - monitorStartedAt < 100, "monitor startup should not wait for the initial thread list")
+assert.ok(websocketClient.backgroundPausedUntil > Date.now())
+await new Promise((resolve) => setImmediate(resolve))
+assert.equal(fakeWebSocket.methods.filter((method) => method === "thread/list").length, 0)
 await websocketClient.interrupt(started.id)
 await websocketClient.archiveThread(started.id)
 await websocketClient.stop()

@@ -268,6 +268,7 @@ export class CodexAppServer extends EventEmitter {
     this.monitorLastDiagnosticAt = 0
     this.monitorStartedAt = 0
     this.monitorInitialized = false
+    this.backgroundPausedUntil = 0
     this.ready = false
     this.stopping = false
     this.stderr = ""
@@ -605,6 +606,10 @@ export class CodexAppServer extends EventEmitter {
     }
   }
 
+  deferBackgroundPoll(durationMs = 5000) {
+    this.backgroundPausedUntil = Math.max(this.backgroundPausedUntil, Date.now() + Math.max(0, Number(durationMs) || 0))
+  }
+
   #monitorDiagnostic(message) {
     const now = Date.now()
     if (this.monitorLastDiagnosticAt && now - this.monitorLastDiagnosticAt < 15 * 60 * 1000) return
@@ -620,8 +625,12 @@ export class CodexAppServer extends EventEmitter {
     const run = async () => {
       let delay = baseInterval
       try {
-        await this.#pollExternalCompletions(limit)
-        this.monitorFailures = 0
+        const foregroundDelay = this.backgroundPausedUntil - Date.now()
+        if (foregroundDelay > 0) delay = Math.max(1000, foregroundDelay)
+        else {
+          await this.#pollExternalCompletions(limit)
+          this.monitorFailures = 0
+        }
       } catch (error) {
         this.monitorFailures += 1
         delay = codexMonitorBackoffMs(baseInterval, this.monitorFailures)

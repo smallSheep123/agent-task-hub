@@ -25,7 +25,7 @@ assert.deepEqual(stale, [{ id: "one" }])
 assert.ok(Date.now() - staleStarted < 20)
 await delay(0)
 release([{ id: "two" }])
-await delay(0)
+await cache.whenIdle(["zcode"])
 assert.deepEqual(cache.snapshot("zcode"), [{ id: "two" }])
 
 cache.remember("zcode", { id: "three" })

@@ -76,7 +76,7 @@ Codex turns started through the Hub keep their live app-server connection, so ap
 
 ZCode uses the App Server bundled with the installed desktop application. The adapter reads the existing ZCode account configuration at runtime, decrypts it only in memory using ZCode's own local format, and never copies provider credentials into Hub configuration, state, logs, or the repository. Sessions started or resumed through Telegram are synchronized into ZCode Desktop's local task index, while interactive and fork sessions are both shown by the Hub. Sessions started through Telegram keep a live subscription for completion, approval, and question handling; polling is retained as a recovery path after restarts.
 
-Session discovery is parallel and cached briefly. A cold request waits at most 1.2 seconds for each agent before rendering available results, while later refreshes continue in the background. Unavailable OpenCode loopback endpoints use bounded exponential backoff so stale registrations cannot delay every Telegram action.
+Session discovery is parallel, prewarmed at gateway startup, and cached briefly. A cold request waits at most 1.2 seconds for each agent before rendering available results, while later refreshes continue in the background. Telegram interactions temporarily yield background recovery scans, ZCode polls only active or changed sessions between periodic recovery checks, and unavailable OpenCode loopback endpoints use bounded exponential backoff. These scheduling rules keep interactive requests responsive without weakening completion recovery.
 
 ### Shared Codex backend
 

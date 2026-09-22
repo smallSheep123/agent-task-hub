@@ -44,6 +44,7 @@ const sessionDiscoveryCache = new SessionDiscoveryCache({
 })
 const openCodeEndpointHealth = new Map()
 const codexActivityCache = new Map()
+let instancesCache = { loadedAt: 0, items: [] }
 
 async function ensureCodexClient(command = null, transport = null) {
   if (codexClient?.ready && codexClient.isRunning) return codexClient
@@ -367,9 +368,10 @@ function requestSessionJson(session, path, options = {}, timeoutMs = 12000) {
   return requestJson(sessionUrl(session, path), { ...options, headers: openCodeHeaders(session, options.headers || {}) }, timeoutMs)
 }
 
-function loadInstances() {
+function loadInstances({ force = false } = {}) {
   const now = Date.now()
-  return readdirSync(instancesDir, { withFileTypes: true })
+  if (!force && now - instancesCache.loadedAt < 2000) return instancesCache.items
+  const items = readdirSync(instancesDir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
     .map((entry) => readJson(join(instancesDir, entry.name)))
     .filter(Boolean)
@@ -379,6 +381,8 @@ function loadInstances() {
       try { process.kill(Number(item.pid), 0); return true } catch { return false }
     })
     .filter((item) => { try { loopbackBase(item.serverUrl); return true } catch { return false } })
+  instancesCache = { loadedAt: now, items }
+  return items
 }
 
 function openCodeEndpointReady(base) {
@@ -616,6 +620,12 @@ async function main(options = {}) {
       chat_id: String(config.allowedChatId),
       ...telegramMarkdownBody(compact(text, 3900), { link_preview_options: { is_disabled: true }, ...extra }),
     })
+  }
+
+  function noteForegroundActivity() {
+    const quietMs = Math.max(2000, Number(config.foregroundQuietMs || 5000))
+    codexClient?.deferBackgroundPoll?.(quietMs)
+    zcodeClient?.deferBackgroundPoll?.(quietMs)
   }
 
   function codexRequestToken(message, client) {
@@ -1684,6 +1694,15 @@ async function main(options = {}) {
     await send(t("page", heading, filtered.length, currentPage, pageCount, lines.join("\n\n")), { reply_markup: { inline_keyboard: keyboard } })
   }
 
+  async function resolveActionSession(target) {
+    if (!target?.id) return null
+    const backend = target.backend || "opencode"
+    const cached = [...(state.sessionMap || []), state.selected].filter(Boolean)
+      .find((item) => item.id === target.id && (item.backend || "opencode") === backend)
+    if (cached) return cached
+    return (await discoverSessions()).find((item) => item.id === target.id && (item.backend || "opencode") === backend) || null
+  }
+
   async function resolveSelected() {
     if (state.viewMode !== "agent" || !state.selected) return null
     if ((state.selected.backend || "opencode") !== state.activeBackend) return null
@@ -1949,13 +1968,15 @@ async function main(options = {}) {
     if (command.name === "send") {
       if ((selected.backend || "opencode") === "codex") {
         const key = migrateSessionState(selected)
-        const status = await currentSessionStatus(selected)
-        if (status !== "idle" || state.queueInFlight[key]) {
-          return queueVisibleCodexTurn(selected, command.arg, status)
-        }
         const client = await ensureCodexClient(config.codexCommand || null)
+        const knownBusy = state.queueInFlight[key] || client.activeTurns.has(String(selected.id))
+        if (knownBusy) return queueVisibleCodexTurn(selected, command.arg, "busy")
         try {
           await client.sendPrompt(selected.id, command.arg)
+          selected.status = "busy"
+          selected.updatedAt = Date.now()
+          sessionDiscoveryCache.remember("Codex", selected)
+          saveState()
         } catch (error) {
           if (error?.code === "CODEX_TURN_ACTIVE" || /already has an active (?:turn|writer)/i.test(String(error?.message || error))) {
             return queueVisibleCodexTurn(selected, command.arg, "busy")
@@ -1988,6 +2009,7 @@ async function main(options = {}) {
       log("AUDIT", `ignored unauthorized callback user=${query?.from?.id || "unknown"}`)
       return
     }
+    noteForegroundActivity()
     const data = String(query.data || "")
     let callbackAnswered = false
     log("AUDIT", `callback user=${query.from.id} data=${data}`)
@@ -2127,21 +2149,21 @@ async function main(options = {}) {
         await telegram("answerCallbackQuery", { callback_query_id: query.id })
         callbackAnswered = true
         const target = decodeSessionAction(data, "select")
-        const session = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
+        const session = await resolveActionSession(target)
         if (!session) throw new Error(t("sessionUnavailable"))
         await selectSession(session)
       } else if (data.startsWith("show:")) {
         await telegram("answerCallbackQuery", { callback_query_id: query.id })
         callbackAnswered = true
         const target = decodeSessionAction(data, "show")
-        const session = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
+        const session = await resolveActionSession(target)
         if (!session) throw new Error(t("sessionUnavailable"))
         await send(await getSessionView(session))
       } else if (data.startsWith("addhelp:")) {
         await telegram("answerCallbackQuery", { callback_query_id: query.id })
         callbackAnswered = true
         const target = decodeSessionAction(data, "addhelp")
-        const session = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
+        const session = await resolveActionSession(target)
         if (!session) throw new Error(t("sessionUnavailable"))
         selectAgentSession(state, { id: session.id, backend: session.backend || "opencode", instanceId: session.instanceId || null, title: session.title, directory: session.directory, serverUrl: (session.backend || "opencode") === "opencode" ? loopbackBase(session.serverUrl) : null, status: session.status || "idle", auth: session.auth || null })
         saveState()
@@ -2150,21 +2172,21 @@ async function main(options = {}) {
         await telegram("answerCallbackQuery", { callback_query_id: query.id })
         callbackAnswered = true
         const target = decodeSessionAction(data, "queue")
-        const session = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
+        const session = await resolveActionSession(target)
         if (!session) throw new Error(t("sessionUnavailable"))
         await send(queueSummary(session))
       } else if (data.startsWith("stopask:")) {
         await telegram("answerCallbackQuery", { callback_query_id: query.id })
         callbackAnswered = true
         const target = decodeSessionAction(data, "stopask")
-        const session = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
+        const session = await resolveActionSession(target)
         if (!session) throw new Error(t("sessionUnavailable"))
         await send(t("confirmStop", session.title), { reply_markup: { inline_keyboard: [[{ text: t("confirmStopButton"), callback_data: encodeSessionAction("abort", session) }, { text: t("cancel"), callback_data: "cancel" }]] } })
       } else if (data.startsWith("abort:")) {
         await telegram("answerCallbackQuery", { callback_query_id: query.id })
         callbackAnswered = true
         const target = decodeSessionAction(data, "abort")
-        const selected = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
+        const selected = await resolveActionSession(target)
         if (!selected) throw new Error(t("sessionUnavailable"))
         const key = migrateSessionState(selected)
         state.queuePaused[key] = true
@@ -2202,6 +2224,7 @@ async function main(options = {}) {
       if (message) log("AUDIT", `rejected Telegram message user=${message.from?.id} chat=${message.chat?.id} type=${message.chat?.type}`)
       return
     }
+    noteForegroundActivity()
     log("AUDIT", `command user=${message.from.id} text=${message.text.slice(0, 80)}`)
     await handleCommand(parseCommand(message.text))
   }
@@ -2511,6 +2534,12 @@ async function main(options = {}) {
     recordError("zcode-startup", error)
     log("WARN", `ZCode adapter startup failed; other agents remain available: ${error.message}`)
   }
+  void (async () => {
+    await discoverSessions({ force: true })
+    await sessionDiscoveryCache.whenIdle(["OpenCode", "Codex", "ZCode"])
+    const sessions = await discoverSessions()
+    log("INFO", `session cache prewarmed sessions=${sessions.length}`)
+  })().catch((error) => log("WARN", `session cache prewarm failed: ${error.message}`))
   try {
     await configureTelegram(true)
   } catch (error) {

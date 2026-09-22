@@ -152,6 +152,13 @@ export function zcodeSessionToHubSession(session) {
   }
 }
 
+export function zcodeSessionNeedsEventPoll(session, { baseline = false, previousVersion, subscribed = false, resident = false, lastPolledAt = 0, now = Date.now(), recoveryIntervalMs = 30000 } = {}) {
+  if (baseline || previousVersion === undefined) return true
+  if (statusText(session?.status) === "busy") return true
+  if (timestamp(session?.updatedAt || session?.updated || session?.createdAt) > Number(previousVersion || 0)) return true
+  return (subscribed || resident) && now - Number(lastPolledAt || 0) >= recoveryIntervalMs
+}
+
 export function zcodeTerminalEvent(event, session = null) {
   const failed = event?.type === "turn.failed"
   const cancelled = event?.type === "turn.completed" && event?.payload?.resultType === "cancelled"
@@ -347,8 +354,12 @@ export class ZCodeAppServer extends EventEmitter {
     this.residentSessions = new Set()
     this.seenEventIds = new Set()
     this.activeStartedAt = new Map()
+    this.sessionVersions = new Map()
+    this.sessionPolledAt = new Map()
     this.monitorTimer = null
     this.monitorBusy = false
+    this.monitorInitialized = false
+    this.backgroundPausedUntil = 0
     this.ready = false
     this.stopping = false
     this.stderr = ""
@@ -576,8 +587,29 @@ export class ZCodeAppServer extends EventEmitter {
     }
   }
 
+  deferBackgroundPoll(durationMs = 5000) {
+    this.backgroundPausedUntil = Math.max(this.backgroundPausedUntil, Date.now() + Math.max(0, Number(durationMs) || 0))
+  }
+
+  async #pollSessionEvents(hubSession) {
+    const previous = this.eventSeq.get(hubSession.id)
+    const result = await this.request("session/events", { sessionId: hubSession.id, ...(previous === undefined ? {} : { afterSeq: previous }), limit: 200 })
+    const events = Array.isArray(result?.events) ? result.events : []
+    const maximum = events.reduce((max, event) => Math.max(max, Number(event?.seq || event?.sequenceNumber || 0)), previous || 0)
+    this.eventSeq.set(hubSession.id, maximum)
+    if (previous !== undefined) {
+      for (const event of events.sort((left, right) => Number(left?.seq || 0) - Number(right?.seq || 0))) {
+        if (Number(event?.seq || event?.sequenceNumber || 0) <= previous) continue
+        this.#acceptEvent(event)
+      }
+    }
+    this.sessionVersions.set(hubSession.id, timestamp(hubSession.updatedAt || hubSession.createdAt))
+    this.sessionPolledAt.set(hubSession.id, Date.now())
+  }
+
   async #pollEvents() {
     if (this.monitorBusy) return
+    if (this.monitorInitialized && Date.now() < this.backgroundPausedUntil) return
     this.monitorBusy = true
     try {
       const listedSessions = await this.listSessions({ limit: 200 })
@@ -586,26 +618,23 @@ export class ZCodeAppServer extends EventEmitter {
         if (!sessionsById.has(sessionId)) sessionsById.set(sessionId, zcodeSessionToHubSession(info))
       }
       const sessions = [...sessionsById.values()]
-      for (const hubSession of sessions) {
-        const session = this.sessions.get(hubSession.id)
-        const previous = this.eventSeq.get(hubSession.id)
-        let result
-        try { result = await this.request("session/events", { sessionId: hubSession.id, ...(previous === undefined ? {} : { afterSeq: previous }), limit: 200 }) } catch { continue }
-        const events = Array.isArray(result?.events) ? result.events : []
-        const maximum = events.reduce((max, event) => Math.max(max, Number(event?.seq || event?.sequenceNumber || 0)), previous || 0)
-        this.eventSeq.set(hubSession.id, maximum)
-        if (previous === undefined) continue
-        for (const event of events.sort((left, right) => Number(left?.seq || 0) - Number(right?.seq || 0))) {
-          if (Number(event?.seq || event?.sequenceNumber || 0) <= previous) continue
-          this.#acceptEvent(event)
-        }
+      const candidates = sessions.filter((session) => zcodeSessionNeedsEventPoll(session, {
+        baseline: !this.monitorInitialized,
+        previousVersion: this.sessionVersions.get(session.id),
+        subscribed: this.subscriptions.has(session.id),
+        resident: this.residentSessions.has(session.id),
+        lastPolledAt: this.sessionPolledAt.get(session.id),
+      }))
+      for (let offset = 0; offset < candidates.length; offset += 8) {
+        await Promise.allSettled(candidates.slice(offset, offset + 8).map((session) => this.#pollSessionEvents(session)))
       }
+      this.monitorInitialized = true
     } finally { this.monitorBusy = false }
   }
 
   async startMonitor({ intervalMs = 5000 } = {}) {
-    await this.#pollEvents()
     if (this.monitorTimer) clearInterval(this.monitorTimer)
+    void this.#pollEvents().catch((error) => this.emit("diagnostic", error.message))
     this.monitorTimer = setInterval(() => { void this.#pollEvents().catch((error) => this.emit("diagnostic", error.message)) }, Math.max(2000, intervalMs))
     this.monitorTimer.unref?.()
   }
@@ -620,6 +649,8 @@ export class ZCodeAppServer extends EventEmitter {
     this.lines?.close?.()
     this.lines = null
     this.residentSessions.clear()
+    this.sessionVersions.clear()
+    this.sessionPolledAt.clear()
     if (child && child.exitCode === null && !child.killed) {
       child.stdin?.end?.()
       await new Promise((resolvePromise) => {

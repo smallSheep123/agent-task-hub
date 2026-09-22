@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here.
 
+## 0.5.4 - 2026-09-23
+
+### Changed
+
+- Prewarm the aggregated session cache during gateway startup instead of making the first Telegram home request do all discovery work.
+- Give Telegram commands and callbacks a foreground window that defers Codex and ZCode recovery polling for five seconds.
+- Send idle-looking Codex prompts directly and rely on the App Server's active-writer response for safe queue fallback, removing a redundant `thread/read` from the common `/send` path.
+- Resolve session buttons from the displayed page or current selection before falling back to agent discovery.
+- Cache the OpenCode instance registry for two seconds to avoid repeated directory and JSON reads during one interaction.
+- Establish one ZCode event baseline, then poll only running, changed, or subscribed sessions; retained a 30-second recovery poll and processed baseline reads in bounded batches.
+
+### Verified
+
+- Passed the full unit, localization, syntax, and stress suites.
+- Passed a real ZCode desktop-index, prompt, response, and completion-event E2E after the polling reduction.
+
 ## 0.5.3 - 2026-09-23
 
 ### Fixed

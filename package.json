@@ -1,6 +1,6 @@
 {
   "name": "agent-task-hub",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "private": true,
   "description": "Multilingual local Telegram task hub for OpenCode, Codex, and ZCode.",
   "type": "module",

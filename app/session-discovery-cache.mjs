@@ -55,5 +55,11 @@ export class SessionDiscoveryCache {
     source.refreshedAt = Date.now()
   }
 
+  async whenIdle(names = null) {
+    const selected = Array.isArray(names) ? names.map((name) => this.#source(name)) : [...this.sources.values()]
+    const pending = selected.map((source) => source.inFlight).filter(Boolean)
+    if (pending.length) await Promise.allSettled(pending)
+  }
+
   snapshot(name) { return [...this.#source(name).sessions] }
 }
