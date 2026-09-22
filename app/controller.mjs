@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url"
 import { createI18n } from "./locales.mjs"
 import { decodeSessionAction, encodeSessionAction, enterAgentMode, enterGlobalMode, filterAgentSessions, initializeAgentContext, migrateSessionCollections, selectAgentSession, sessionIdentity } from "./agent-context.mjs"
 import { codexTaskStartedAt, codexThreadAppearsActive, elapsedDurationParts, isRunningStatus, openCodeTaskStartedAt, timestampMilliseconds } from "./dashboard.mjs"
+import { SessionDiscoveryCache } from "./session-discovery-cache.mjs"
 import { telegramMarkdownBody } from "./telegram-markdown.mjs"
 import { approvalOptionsForRequest, approvalResponseForRequest, CodexAppServer, terminalEventFromNotification } from "../adapters/codex-app-server.mjs"
 import { chooseOpenCodeQuestionOption, completeOpenCodeQuestion, nextOpenCodeQuestionIndex, normalizeOpenCodeQuestion, openCodeQuestionAnswers, openCodeQuestionToken, submitOpenCodeQuestion } from "../adapters/opencode-question.mjs"
@@ -36,6 +37,13 @@ let zcodeStartPromise = null
 let zcodeLastError = null
 let zcodeRetryAfter = 0
 let zcodeDefaultBundle = process.env.AGENT_TASK_HUB_ZCODE_BUNDLE || ""
+const sessionDiscoveryCache = new SessionDiscoveryCache({
+  ttlMs: 8000,
+  initialWaitMs: 1200,
+  onError: (name, error) => log("WARN", `${name} session refresh unavailable: ${error?.message || error}`),
+})
+const openCodeEndpointHealth = new Map()
+const codexActivityCache = new Map()
 
 async function ensureCodexClient(command = null, transport = null) {
   if (codexClient?.ready && codexClient.isRunning) return codexClient
@@ -373,6 +381,23 @@ function loadInstances() {
     .filter((item) => { try { loopbackBase(item.serverUrl); return true } catch { return false } })
 }
 
+function openCodeEndpointReady(base) {
+  return Date.now() >= Number(openCodeEndpointHealth.get(base)?.retryAfter || 0)
+}
+
+function noteOpenCodeSuccess(base) {
+  openCodeEndpointHealth.delete(base)
+}
+
+function noteOpenCodeFailure(base, error, scope = "session") {
+  const previous = openCodeEndpointHealth.get(base) || { failures: 0, retryAfter: 0, loggedAt: 0 }
+  const failures = Math.min(8, previous.failures + 1)
+  const delay = Math.min(300000, 5000 * (2 ** Math.min(6, failures - 1)))
+  const now = Date.now()
+  openCodeEndpointHealth.set(base, { failures, retryAfter: now + delay, loggedAt: now })
+  if (now - Number(previous.loggedAt || 0) >= 30000) log("WARN", `OpenCode ${scope} unavailable ${base}; retry in ${Math.ceil(delay / 1000)}s: ${error?.message || error}`)
+}
+
 async function discoverOpenCodeSessions() {
   const combined = new Map()
   const groups = new Map()
@@ -382,6 +407,7 @@ async function discoverOpenCodeSessions() {
     groups.get(base).push(instance)
   }
   const results = await Promise.allSettled([...groups.entries()].map(async ([base, instances]) => {
+    if (!openCodeEndpointReady(base)) return []
     const found = []
     for (const instance of instances) {
       const query = new URLSearchParams({ directory: instance.directory || "" })
@@ -389,10 +415,11 @@ async function discoverOpenCodeSessions() {
       let statuses
       try {
         [sessions, statuses] = await Promise.all([
-          requestJson(`${base}/session?${query}`, { headers: openCodeHeaders(instance) }, 5000),
-          requestJson(`${base}/session/status?${query}`, { headers: openCodeHeaders(instance) }, 5000).catch(() => ({})),
+          requestJson(`${base}/session?${query}`, { headers: openCodeHeaders(instance) }, 1500),
+          requestJson(`${base}/session/status?${query}`, { headers: openCodeHeaders(instance) }, 1500).catch(() => ({})),
         ])
       } catch (error) {
+        noteOpenCodeFailure(base, error, "session scan")
         throw new Error(`${base}: ${error.message}`)
       }
       found.push(...(Array.isArray(sessions) ? sessions : []).map((info) => ({
@@ -406,13 +433,13 @@ async function discoverOpenCodeSessions() {
           status: statuses?.[info.id]?.type || "idle",
           summary: info.summary || null,
           auth: instance.auth || null,
-        })))
+      })))
     }
+    noteOpenCodeSuccess(base)
     return found
     }))
   for (const result of results) {
     if (result.status === "rejected") {
-      log("WARN", `OpenCode instance unavailable: ${result.reason?.message || result.reason}`)
       continue
     }
     for (const item of result.value) {
@@ -423,24 +450,18 @@ async function discoverOpenCodeSessions() {
   return [...combined.values()].sort((a, b) => b.updated - a.updated)
 }
 
-async function discoverSessions() {
-  const openCode = await discoverOpenCodeSessions()
-  let codex = []
-  let zcode = []
-  try {
-    const client = await ensureCodexClient()
-    codex = await client.listSessions({ limit: 200 })
-  } catch (error) {
-    codexLastError = error
-    log("WARN", `Codex adapter unavailable: ${error.message}`)
-  }
-  try {
-    const client = await ensureZCodeClient()
-    zcode = await client.listSessions({ limit: 200 })
-  } catch (error) {
-    zcodeLastError = error
-    log("WARN", `ZCode adapter unavailable: ${error.message}`)
-  }
+async function discoverSessions({ force = false } = {}) {
+  const [openCode, codex, zcode] = await Promise.all([
+    sessionDiscoveryCache.get("OpenCode", discoverOpenCodeSessions, { force }),
+    sessionDiscoveryCache.get("Codex", async () => {
+      const client = await ensureCodexClient()
+      return client.listSessions({ limit: 200 })
+    }, { force }),
+    sessionDiscoveryCache.get("ZCode", async () => {
+      const client = await ensureZCodeClient()
+      return client.listSessions({ limit: 200 })
+    }, { force }),
+  ])
   const updated = (item) => {
     let value = Number(item.updated || item.updatedAt || 0)
     if (value > 0 && value < 1e12) value *= 1000
@@ -910,11 +931,13 @@ async function main(options = {}) {
     }
     for (const instance of unique.values()) {
       const base = loopbackBase(instance.serverUrl)
+      if (!openCodeEndpointReady(base)) continue
       const directory = String(instance.directory || "")
       const scope = `${base}\n${directory}`
       try {
         const query = new URLSearchParams({ directory })
-        const list = await requestJson(`${base}/permission?${query}`, { headers: openCodeHeaders(instance) }, 5000)
+        const list = await requestJson(`${base}/permission?${query}`, { headers: openCodeHeaders(instance) }, 1500)
+        noteOpenCodeSuccess(base)
         checkedScopes.add(scope)
         for (const raw of Array.isArray(list) ? list : []) {
           if (!raw?.id) continue
@@ -941,7 +964,7 @@ async function main(options = {}) {
           found.set(token, request)
         }
       } catch (error) {
-        log("WARN", `permission scan unavailable ${base}: ${error.message}`)
+        noteOpenCodeFailure(base, error, "permission scan")
       }
     }
     return { found, checkedScopes }
@@ -1090,11 +1113,13 @@ async function main(options = {}) {
     }
     for (const instance of unique.values()) {
       const base = loopbackBase(instance.serverUrl)
+      if (!openCodeEndpointReady(base)) continue
       const directory = String(instance.directory || "")
       const scope = `${base}\n${directory}`
       try {
         const query = new URLSearchParams({ directory })
-        const list = await requestJson(`${base}/question?${query}`, { headers: openCodeHeaders(instance) }, 5000)
+        const list = await requestJson(`${base}/question?${query}`, { headers: openCodeHeaders(instance) }, 1500)
+        noteOpenCodeSuccess(base)
         checkedScopes.add(scope)
         for (const raw of Array.isArray(list) ? list : []) {
           const normalized = normalizeOpenCodeQuestion(raw)
@@ -1119,7 +1144,7 @@ async function main(options = {}) {
           found.set(token, request)
         }
       } catch (error) {
-        log("WARN", `question scan unavailable ${base}: ${error.message}`)
+        noteOpenCodeFailure(base, error, "question scan")
       }
     }
     return { found, checkedScopes }
@@ -1488,14 +1513,42 @@ async function main(options = {}) {
       })
       .slice(0, probeLimit)
     if (!candidates.length) return allSessions
-    const client = await ensureCodexClient(config.codexCommand || null)
-    const results = await Promise.allSettled(candidates.map((session) => client.readThread(session.id)))
-    results.forEach((result, index) => {
-      if (result.status !== "fulfilled" || !codexThreadAppearsActive(result.value)) return
-      candidates[index].status = "busy"
-      candidates[index].dashboardStartedAt = codexTaskStartedAt(result.value)
-      candidates[index].activeTurnId = result.value?.turns?.at(-1)?.id || candidates[index].activeTurnId || null
-    })
+    const client = codexClient?.ready && codexClient.isRunning ? codexClient : null
+    if (!client) return allSessions
+    const now = Date.now()
+    const refreshes = []
+    for (const session of candidates) {
+      const cached = codexActivityCache.get(session.id)
+      if (cached?.active) {
+        session.status = "busy"
+        session.dashboardStartedAt = cached.startedAt
+        session.activeTurnId = cached.activeTurnId || session.activeTurnId || null
+      }
+      if (cached?.inFlight || now - Number(cached?.checkedAt || 0) < 5000) continue
+      const entry = cached || { active: false, startedAt: 0, activeTurnId: null, checkedAt: 0, inFlight: null }
+      entry.inFlight = client.readThread(session.id)
+        .then((thread) => {
+          entry.active = codexThreadAppearsActive(thread)
+          entry.startedAt = entry.active ? codexTaskStartedAt(thread) : 0
+          entry.activeTurnId = entry.active ? thread?.turns?.at(-1)?.id || null : null
+          entry.checkedAt = Date.now()
+        })
+        .catch((error) => {
+          entry.checkedAt = Date.now()
+          log("WARN", `Codex dashboard probe failed session=${session.id}: ${error.message}`)
+        })
+        .finally(() => { entry.inFlight = null })
+      codexActivityCache.set(session.id, entry)
+      refreshes.push(entry.inFlight)
+    }
+    if (refreshes.length) await Promise.race([Promise.allSettled(refreshes), sleep(700)])
+    for (const session of candidates) {
+      const cached = codexActivityCache.get(session.id)
+      if (!cached?.active) continue
+      session.status = "busy"
+      session.dashboardStartedAt = cached.startedAt
+      session.activeTurnId = cached.activeTurnId || session.activeTurnId || null
+    }
     return allSessions
   }
 
@@ -1659,10 +1712,11 @@ async function main(options = {}) {
         if (!existsSync(project.directory) || !statSync(project.directory).isDirectory()) return send(t("projectUnavailable", project.alias, project.directory))
         if (backend === "zcode") {
           const client = await attachZCodeAdapter()
-          const session = await client.startSession({ cwd: project.directory, model: config.zcodeNewModel || null, thoughtLevel: config.zcodeThoughtLevel || "high" })
+          const session = await client.startSession({ cwd: project.directory, model: config.zcodeNewModel || null, thoughtLevel: config.zcodeThoughtLevel || "high", title: shortLine(command.arg.prompt, 180) })
           session.title = shortLine(command.arg.prompt, 180)
           session.status = "busy"
           session.updatedAt = Date.now()
+          sessionDiscoveryCache.remember("ZCode", session)
           selectAgentSession(state, session)
           state.sessionMap = [session, ...(state.sessionMap || []).filter((item) => item.id !== session.id)].slice(0, 100)
           saveState()
@@ -1686,6 +1740,7 @@ async function main(options = {}) {
           updatedAt: Date.now(),
           activeTurnId: null,
         }
+        sessionDiscoveryCache.remember("Codex", session)
         selectAgentSession(state, session)
         state.sessionMap = [session, ...(state.sessionMap || []).filter((item) => item.id !== session.id)].slice(0, 100)
         saveState()
@@ -1910,6 +1965,9 @@ async function main(options = {}) {
       } else if (selected.backend === "zcode") {
         const client = await ensureZCodeClient(config.zcodeBundle || null)
         await client.sendPrompt(selected.id, command.arg)
+        selected.status = "busy"
+        selected.updatedAt = Date.now()
+        sessionDiscoveryCache.remember("ZCode", selected)
       } else {
         const id = encodeURIComponent(selected.id)
         await requestSessionJson(selected, `/session/${id}/prompt_async`, {
@@ -1931,6 +1989,7 @@ async function main(options = {}) {
       return
     }
     const data = String(query.data || "")
+    let callbackAnswered = false
     log("AUDIT", `callback user=${query.from.id} data=${data}`)
     try {
       const permissionMatch = data.match(/^perm:([0-9a-f]{16}):(once|always|reject)$/)
@@ -2065,38 +2124,45 @@ async function main(options = {}) {
         await commandSessions(Number.parseInt(data.slice(9), 10) || 1, state.sessionBrowser?.query || "", state.sessionBrowser?.backend || "all")
       }
       else if (data.startsWith("select:")) {
+        await telegram("answerCallbackQuery", { callback_query_id: query.id })
+        callbackAnswered = true
         const target = decodeSessionAction(data, "select")
         const session = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
         if (!session) throw new Error(t("sessionUnavailable"))
         await selectSession(session)
-        await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("setCurrent") })
       } else if (data.startsWith("show:")) {
+        await telegram("answerCallbackQuery", { callback_query_id: query.id })
+        callbackAnswered = true
         const target = decodeSessionAction(data, "show")
         const session = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
         if (!session) throw new Error(t("sessionUnavailable"))
         await send(await getSessionView(session))
-        await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("detailSent") })
       } else if (data.startsWith("addhelp:")) {
+        await telegram("answerCallbackQuery", { callback_query_id: query.id })
+        callbackAnswered = true
         const target = decodeSessionAction(data, "addhelp")
         const session = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
         if (!session) throw new Error(t("sessionUnavailable"))
         selectAgentSession(state, { id: session.id, backend: session.backend || "opencode", instanceId: session.instanceId || null, title: session.title, directory: session.directory, serverUrl: (session.backend || "opencode") === "opencode" ? loopbackBase(session.serverUrl) : null, status: session.status || "idle", auth: session.auth || null })
         saveState()
-        await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("setCurrent") })
         await send(t("addHelp", session.title))
       } else if (data.startsWith("queue:")) {
+        await telegram("answerCallbackQuery", { callback_query_id: query.id })
+        callbackAnswered = true
         const target = decodeSessionAction(data, "queue")
         const session = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
         if (!session) throw new Error(t("sessionUnavailable"))
         await send(queueSummary(session))
-        await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("queueSent") })
       } else if (data.startsWith("stopask:")) {
+        await telegram("answerCallbackQuery", { callback_query_id: query.id })
+        callbackAnswered = true
         const target = decodeSessionAction(data, "stopask")
         const session = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
         if (!session) throw new Error(t("sessionUnavailable"))
-        await telegram("answerCallbackQuery", { callback_query_id: query.id })
         await send(t("confirmStop", session.title), { reply_markup: { inline_keyboard: [[{ text: t("confirmStopButton"), callback_data: encodeSessionAction("abort", session) }, { text: t("cancel"), callback_data: "cancel" }]] } })
       } else if (data.startsWith("abort:")) {
+        await telegram("answerCallbackQuery", { callback_query_id: query.id })
+        callbackAnswered = true
         const target = decodeSessionAction(data, "abort")
         const selected = (await discoverSessions()).find((item) => item.id === target?.id && (item.backend || "opencode") === target?.backend)
         if (!selected) throw new Error(t("sessionUnavailable"))
@@ -2113,7 +2179,6 @@ async function main(options = {}) {
         } else {
           await requestSessionJson(selected, `/session/${encodeURIComponent(selected.id)}/abort`, { method: "POST" })
         }
-        await telegram("answerCallbackQuery", { callback_query_id: query.id, text: t("stopRequested") })
         await send(t("stopDoneAgent", backendText(selected.backend)))
       } else if (data.startsWith("clearq:")) {
         const target = decodeSessionAction(data, "clearq")
@@ -2125,7 +2190,8 @@ async function main(options = {}) {
         await send(t("queueClearedDetail"))
       }
     } catch (error) {
-      await telegram("answerCallbackQuery", { callback_query_id: query.id, text: compact(error.message, 120), show_alert: true }).catch(() => {})
+      if (callbackAnswered) await send(t("operationFailed", compact(error.message, 500))).catch(() => {})
+      else await telegram("answerCallbackQuery", { callback_query_id: query.id, text: compact(error.message, 120), show_alert: true }).catch(() => {})
     }
   }
 
@@ -2415,12 +2481,17 @@ async function main(options = {}) {
   if (options.homeCheck) {
     try { await attachCodexAdapter() } catch {}
     try { await attachZCodeAdapter() } catch {}
+    const renderStartedAt = Date.now()
     const payload = await buildHomePayload()
+    const renderMs = Date.now() - renderStartedAt
     const callbacks = payload.reply_markup.inline_keyboard.flat().map((button) => String(button.callback_data || ""))
     if (!payload.text.includes(t("agentOpenCode")) || !payload.text.includes(t("agentCodex")) || !payload.text.includes(t("agentZCode"))) throw new Error("Dashboard agent sections are incomplete")
     if (payload.text.length > 3900) throw new Error("Dashboard text exceeds Telegram limit")
     if (callbacks.some((value) => Buffer.byteLength(value, "utf8") > 64)) throw new Error("Dashboard callback exceeds Telegram limit")
-    console.log(`HOME_CHECK=PASS SESSIONS=${payload.sessions.length} RUNNING=${payload.running.length} TEXT=${payload.text.length} BUTTONS=${callbacks.length}`)
+    const warmStartedAt = Date.now()
+    await buildHomePayload()
+    const warmMs = Date.now() - warmStartedAt
+    console.log(`HOME_CHECK=PASS SESSIONS=${payload.sessions.length} RUNNING=${payload.running.length} TEXT=${payload.text.length} BUTTONS=${callbacks.length} RENDER_MS=${renderMs} WARM_MS=${warmMs}`)
     await codexClient?.stop().catch(() => {})
     await zcodeClient?.stop().catch(() => {})
     return

@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here.
 
+## 0.5.3 - 2026-09-23
+
+### Fixed
+
+- Registered Telegram-created and resumed ZCode tasks in the desktop task index, so they remain visible in ZCode Desktop as well as in the Hub.
+- Included ZCode fork sessions in Telegram session discovery.
+- Made home, agent, session-list, and callback navigation use parallel stale-while-revalidate discovery with a 1.2-second cold-start ceiling.
+- Added exponential backoff and log throttling for stale OpenCode loopback endpoints instead of retrying every dead port every five seconds.
+- Acknowledged session action buttons before slower reads and cached Codex dashboard probes, so Telegram stops showing a long-running button spinner.
+- Avoided redundant ZCode session resumes after the adapter already owns the resident session.
+
+### Verified
+
+- Added deterministic discovery-cache and ZCode desktop-index tests.
+- Passed the real ZCode create, desktop-index, prompt, completion-event, and reply E2E flow.
+
 ## 0.5.2 - 2026-09-22
 
 ### Fixed

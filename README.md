@@ -74,7 +74,9 @@ OpenCode questions are discovered independently of the selected Telegram mode. S
 
 Codex turns started through the Hub keep their live app-server connection, so approvals and questions can be answered from Telegram. For a turn started in another Codex client, the Hub detects and aggregates its terminal completion; live approvals and questions remain in the client that owns that app-server connection.
 
-ZCode uses the App Server bundled with the installed desktop application. The adapter reads the existing ZCode account configuration at runtime, decrypts it only in memory using ZCode's own local format, and never copies provider credentials into Hub configuration, state, logs, or the repository. Sessions started through Telegram keep a live subscription for completion, approval, and question handling; polling is retained as a recovery path after restarts.
+ZCode uses the App Server bundled with the installed desktop application. The adapter reads the existing ZCode account configuration at runtime, decrypts it only in memory using ZCode's own local format, and never copies provider credentials into Hub configuration, state, logs, or the repository. Sessions started or resumed through Telegram are synchronized into ZCode Desktop's local task index, while interactive and fork sessions are both shown by the Hub. Sessions started through Telegram keep a live subscription for completion, approval, and question handling; polling is retained as a recovery path after restarts.
+
+Session discovery is parallel and cached briefly. A cold request waits at most 1.2 seconds for each agent before rendering available results, while later refreshes continue in the background. Unavailable OpenCode loopback endpoints use bounded exponential backoff so stale registrations cannot delay every Telegram action.
 
 ### Shared Codex backend
 

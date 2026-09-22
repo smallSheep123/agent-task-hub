@@ -5,6 +5,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
 import { homedir, platform, userInfo } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import readline from "node:readline"
+import { DatabaseSync } from "node:sqlite"
 
 const ZCODE_INSTANCE_ID = "zcode-local"
 const ACCOUNT_KEY = /^account-provider:coding-plan:(account:[^:]+):account:([^:]+):api-key$/
@@ -40,6 +41,98 @@ function workspaceRef(directory) {
 
 function titleForSession(value) {
   return String(value?.title || "ZCode task").split(/\r?\n/, 1)[0].trim().slice(0, 180) || "ZCode task"
+}
+
+function taskStatus(value) {
+  const status = String(value || "completed").toLowerCase()
+  if (["running", "waiting", "paused", "active", "busy"].includes(status)) return "running"
+  if (["error", "failed"].includes(status)) return "error"
+  return "completed"
+}
+
+function modelText(value) {
+  if (typeof value === "string") return value
+  const providerId = String(value?.providerId || "")
+  const modelId = String(value?.modelId || "")
+  return [providerId, modelId].filter(Boolean).join("/")
+}
+
+export function zcodeTaskIndexRecord(session, overrides = {}) {
+  const taskId = String(session?.sessionId || session?.id || "")
+  const workspace = workspacePath(session?.workspace) || String(session?.directory || "")
+  const title = String(overrides.title || titleForSession(session)).slice(0, 500)
+  const model = modelText(session?.model || overrides.model)
+  const createdAt = timestamp(session?.createdAt) || Date.now()
+  const updatedAt = timestamp(overrides.updatedAt || session?.updatedAt) || Date.now()
+  const status = taskStatus(overrides.status || session?.status)
+  const mode = String(session?.mode || overrides.mode || "build")
+  const provider = String(session?.provider || overrides.provider || "glm")
+  const thoughtLevel = String(session?.thoughtLevel || session?.model?.options?.reasoningLevel || overrides.thoughtLevel || "high")
+  const meta = {
+    taskId,
+    ...(session?.traceId ? { traceId: String(session.traceId) } : {}),
+    title,
+    titleOverridden: false,
+    workspacePath: workspace,
+    createdAt,
+    updatedAt,
+    mode,
+    model,
+    thoughtLevel,
+    provider,
+    status,
+    target: session?.target ?? null,
+  }
+  return {
+    workspaceKey: workspace,
+    workspacePath: workspace,
+    taskId,
+    title,
+    status,
+    provider,
+    mode,
+    model,
+    forkedFromTaskId: session?.parentSessionId ? String(session.parentSessionId) : null,
+    createdAt,
+    updatedAt,
+    metaJson: JSON.stringify(meta),
+    searchableText: `${title}\n${workspace}`.trim(),
+  }
+}
+
+export function upsertZCodeTaskIndex(dataRoot, session, overrides = {}) {
+  const path = join(dataRoot, "tasks-index.sqlite")
+  if (!existsSync(path)) return false
+  const record = zcodeTaskIndexRecord(session, overrides)
+  if (!record.taskId || !record.workspacePath) return false
+  const db = new DatabaseSync(path)
+  try {
+    db.exec("PRAGMA busy_timeout=3000")
+    db.prepare(`
+      INSERT INTO tasks (
+        workspace_key, workspace_path, workspace_identity, task_id, title, task_status,
+        provider, mode, model, migration_source, forked_from_task_id, created_at, updated_at,
+        unread_at, last_unread_at, pinned, archived, deleted, title_overridden, meta_json,
+        searchable_text, cron_automation_id, off_peak_task_id
+      ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL, 0, 0, 0, 0, 0, ?, ?, NULL, NULL)
+      ON CONFLICT(workspace_key, task_id) DO UPDATE SET
+        workspace_path = excluded.workspace_path,
+        title = CASE WHEN excluded.title <> '' THEN excluded.title ELSE tasks.title END,
+        task_status = excluded.task_status,
+        provider = excluded.provider,
+        mode = excluded.mode,
+        model = excluded.model,
+        forked_from_task_id = COALESCE(excluded.forked_from_task_id, tasks.forked_from_task_id),
+        updated_at = MAX(tasks.updated_at, excluded.updated_at),
+        meta_json = excluded.meta_json,
+        searchable_text = excluded.searchable_text
+    `).run(
+      record.workspaceKey, record.workspacePath, record.taskId, record.title, record.status,
+      record.provider, record.mode, record.model, record.forkedFromTaskId, record.createdAt,
+      record.updatedAt, record.metaJson, record.searchableText,
+    )
+    return true
+  } finally { db.close() }
 }
 
 export function zcodeSessionToHubSession(session) {
@@ -251,6 +344,7 @@ export class ZCodeAppServer extends EventEmitter {
     this.sessions = new Map()
     this.eventSeq = new Map()
     this.subscriptions = new Set()
+    this.residentSessions = new Set()
     this.seenEventIds = new Set()
     this.activeStartedAt = new Map()
     this.monitorTimer = null
@@ -367,7 +461,7 @@ export class ZCodeAppServer extends EventEmitter {
     const result = await this.request("session/list", { limit, includeArchived: false }, 60000)
     const list = Array.isArray(result?.sessions) ? result.sessions : []
     for (const item of list) this.sessions.set(String(item.sessionId || item.id), item)
-    return list.filter((item) => item?.sessionKind === "interactive").map((item) => {
+    return list.filter((item) => ["interactive", "fork"].includes(item?.sessionKind)).map((item) => {
       const session = zcodeSessionToHubSession(item)
       session.activeStartedAt = this.activeStartedAt.get(session.id) || 0
       session.dashboardStartedAt = session.activeStartedAt
@@ -387,6 +481,7 @@ export class ZCodeAppServer extends EventEmitter {
     }
     const info = result?.session || result?.snapshot?.session || this.sessions.get(String(sessionId)) || { sessionId }
     this.sessions.set(String(sessionId), info)
+    this.#syncTaskIndex(info)
     return result
   }
 
@@ -400,20 +495,25 @@ export class ZCodeAppServer extends EventEmitter {
     const sessionId = String(cached?.sessionId || cached?.id || session)
     const workspace = cached?.workspace || (cached?.directory ? workspaceRef(cached.directory) : undefined)
     const result = await this.request("session/resume", { sessionId, ...(workspace ? { workspace } : {}) }, 60000)
+    this.residentSessions.add(sessionId)
     return result
   }
 
   async sendPrompt(sessionId, content) {
     const id = String(sessionId)
-    await this.resume(this.sessions.get(id) || id).catch((error) => {
-      if (!/already|resident|active/i.test(error.message)) throw error
-    })
+    if (!this.residentSessions.has(id)) {
+      await this.resume(this.sessions.get(id) || id).catch((error) => {
+        if (!/already|resident|active/i.test(error.message)) throw error
+        this.residentSessions.add(id)
+      })
+    }
     await this.#subscribe(id)
+    this.#syncTaskIndex(this.sessions.get(id) || { sessionId: id }, { status: "running", updatedAt: Date.now() })
     const result = await this.request("session/send", { sessionId: id, content: String(content), inputId: randomUUID(), queryId: randomUUID() }, 60000)
     return { id: null, accepted: result?.accepted === true }
   }
 
-  async startSession({ cwd, model = null, thoughtLevel = "high", mode = "build" } = {}) {
+  async startSession({ cwd, model = null, thoughtLevel = "high", mode = "build", title = null } = {}) {
     const selection = model || { providerId: this.defaultProviderId || this.accounts.keys().next().value, modelId: "GLM-5.3", options: { reasoningLevel: thoughtLevel } }
     const result = await this.request("session/create", {
       workspace: workspaceRef(cwd), mode, model: selection, thoughtLevel,
@@ -422,7 +522,10 @@ export class ZCodeAppServer extends EventEmitter {
     const info = result?.session || result?.snapshot?.session || result
     if (!info?.sessionId && !info?.id) throw new Error("ZCode session/create returned no session id")
     const sessionId = String(info.sessionId || info.id)
+    if (title) info.title = String(title)
     this.sessions.set(sessionId, info)
+    this.residentSessions.add(sessionId)
+    this.#syncTaskIndex(info, { title, status: "running", thoughtLevel })
     await this.#subscribe(sessionId)
     return zcodeSessionToHubSession(info)
   }
@@ -445,6 +548,14 @@ export class ZCodeAppServer extends EventEmitter {
     this.subscriptions.add(id)
   }
 
+  #syncTaskIndex(session, overrides = {}) {
+    try { return upsertZCodeTaskIndex(this.dataRoot, session, overrides) }
+    catch (error) {
+      this.emit("diagnostic", `ZCode Desktop task index sync failed: ${error.message}`)
+      return false
+    }
+  }
+
   #acceptEvent(event) {
     if (!event || typeof event !== "object") return
     const sessionId = String(event.sessionId || "")
@@ -454,9 +565,13 @@ export class ZCodeAppServer extends EventEmitter {
     if (eventId) this.seenEventIds.add(eventId)
     const sequence = Number(event.seq || event.sequenceNumber || 0)
     if (sequence > 0) this.eventSeq.set(sessionId, Math.max(this.eventSeq.get(sessionId) || 0, sequence))
-    if (event.type === "turn.started") this.activeStartedAt.set(sessionId, timestamp(event.timestamp) || Date.now())
+    if (event.type === "turn.started") {
+      this.activeStartedAt.set(sessionId, timestamp(event.timestamp) || Date.now())
+      this.#syncTaskIndex(this.sessions.get(sessionId) || { sessionId }, { status: "running", updatedAt: event.timestamp })
+    }
     if (event.type === "turn.completed" || event.type === "turn.failed") {
       this.activeStartedAt.delete(sessionId)
+      this.#syncTaskIndex(this.sessions.get(sessionId) || { sessionId }, { status: event.type === "turn.failed" ? "error" : "completed", updatedAt: event.timestamp })
       this.emit("terminal", zcodeTerminalEvent(event, this.sessions.get(sessionId)))
     }
   }
@@ -504,6 +619,7 @@ export class ZCodeAppServer extends EventEmitter {
     this.process = null
     this.lines?.close?.()
     this.lines = null
+    this.residentSessions.clear()
     if (child && child.exitCode === null && !child.killed) {
       child.stdin?.end?.()
       await new Promise((resolvePromise) => {

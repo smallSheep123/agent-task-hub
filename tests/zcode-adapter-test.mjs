@@ -1,5 +1,9 @@
 import assert from "node:assert/strict"
-import { resolveZCodeBundle, zcodeSessionToHubSession, zcodeTerminalEvent } from "../adapters/zcode-app-server.mjs"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
+import { resolveZCodeBundle, upsertZCodeTaskIndex, zcodeSessionToHubSession, zcodeTaskIndexRecord, zcodeTerminalEvent } from "../adapters/zcode-app-server.mjs"
 
 const session = zcodeSessionToHubSession({
   sessionId: "sess_1",
@@ -32,6 +36,53 @@ assert.equal(cancelled.type, "session.interrupted")
 const failed = zcodeTerminalEvent({ eventId: "event_3", sessionId: "sess_1", type: "turn.failed", payload: { error: { message: "boom" } } })
 assert.equal(failed.type, "session.error")
 assert.equal(failed.error, "boom")
+
+const record = zcodeTaskIndexRecord({
+  sessionId: "sess_indexed",
+  title: "Telegram task",
+  workspace: { workspacePath: "C:\\work" },
+  status: "running",
+  mode: "build",
+  model: { providerId: "account:test", modelId: "GLM-5.3", options: { reasoningLevel: "high" } },
+  createdAt: 1700000000000,
+  updatedAt: 1700000010000,
+})
+assert.equal(record.workspaceKey, "C:\\work")
+assert.equal(record.model, "account:test/GLM-5.3")
+assert.equal(record.status, "running")
+
+const dataRoot = mkdtempSync(join(tmpdir(), "agent-task-hub-zcode-index-"))
+try {
+  const database = new DatabaseSync(join(dataRoot, "tasks-index.sqlite"))
+  database.exec(`CREATE TABLE tasks (
+    workspace_key TEXT NOT NULL, workspace_path TEXT NOT NULL, workspace_identity TEXT,
+    task_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', task_status TEXT, provider TEXT,
+    mode TEXT NOT NULL DEFAULT 'build', model TEXT, migration_source TEXT,
+    forked_from_task_id TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+    unread_at INTEGER, last_unread_at INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0,
+    title_overridden INTEGER NOT NULL DEFAULT 0, meta_json TEXT NOT NULL DEFAULT '{}',
+    searchable_text TEXT NOT NULL DEFAULT '', cron_automation_id TEXT, off_peak_task_id TEXT,
+    PRIMARY KEY(workspace_key, task_id)
+  )`)
+  database.close()
+  assert.equal(upsertZCodeTaskIndex(dataRoot, {
+    sessionId: "sess_indexed", title: "Telegram task", workspace: { workspacePath: "C:\\work" },
+    status: "running", mode: "build", model: { providerId: "account:test", modelId: "GLM-5.3" },
+    createdAt: 1700000000000, updatedAt: 1700000010000,
+  }), true)
+  assert.equal(upsertZCodeTaskIndex(dataRoot, {
+    sessionId: "sess_indexed", title: "Telegram task", workspace: { workspacePath: "C:\\work" },
+    status: "completed", mode: "build", model: { providerId: "account:test", modelId: "GLM-5.3" },
+    createdAt: 1700000000000, updatedAt: 1700000020000,
+  }), true)
+  const check = new DatabaseSync(join(dataRoot, "tasks-index.sqlite"), { readOnly: true })
+  const indexed = check.prepare("SELECT * FROM tasks WHERE task_id = ?").get("sess_indexed")
+  check.close()
+  assert.equal(indexed.task_status, "completed")
+  assert.equal(indexed.updated_at, 1700000020000)
+  assert.equal(JSON.parse(indexed.meta_json).model, "account:test/GLM-5.3")
+} finally { rmSync(dataRoot, { recursive: true, force: true }) }
 
 assert.equal(typeof resolveZCodeBundle, "function")
 if (process.env.AGENT_TASK_HUB_TEST_ZCODE_BUNDLE) assert.equal(typeof resolveZCodeBundle(process.env.AGENT_TASK_HUB_TEST_ZCODE_BUNDLE), "string")
