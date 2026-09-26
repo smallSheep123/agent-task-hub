@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
-import { resolveZCodeBundle, upsertZCodeTaskIndex, zcodeSessionNeedsEventPoll, zcodeSessionToHubSession, zcodeTaskIndexRecord, zcodeTerminalEvent } from "../adapters/zcode-app-server.mjs"
+import { resolveZCodeBundle, upsertZCodeTaskIndex, zcodeIndexCompletion, zcodeSessionNeedsEventPoll, zcodeSessionToHubSession, zcodeTaskIndexRecord, zcodeTerminalEvent } from "../adapters/zcode-app-server.mjs"
 
 const session = zcodeSessionToHubSession({
   sessionId: "sess_1",
@@ -45,6 +45,10 @@ assert.equal(zcodeSessionNeedsEventPoll({ ...idlePollTarget, updatedAt: 17000000
 assert.equal(zcodeSessionNeedsEventPoll(idlePollTarget, { previousVersion: 1700000010000, subscribed: true, lastPolledAt: 1000, now: 32000 }), true)
 assert.equal(zcodeSessionNeedsEventPoll(idlePollTarget, { previousVersion: 1700000010000, subscribed: true, lastPolledAt: 10000, now: 32000 }), false)
 assert.equal(zcodeSessionNeedsEventPoll(idlePollTarget, { previousVersion: 1700000010000 }), false)
+assert.equal(zcodeIndexCompletion(null, { status: "completed", updatedAt: 2000 }, 1000), false)
+assert.equal(zcodeIndexCompletion({ status: "running", updatedAt: 1000 }, { status: "completed", updatedAt: 2000 }, 1500), true)
+assert.equal(zcodeIndexCompletion({ status: "completed", updatedAt: 1000 }, { status: "completed", updatedAt: 2000 }, 1500), true)
+assert.equal(zcodeIndexCompletion({ status: "completed", updatedAt: 1000 }, { status: "completed", updatedAt: 1000 }, 1500), false)
 
 const record = zcodeTaskIndexRecord({
   sessionId: "sess_indexed",

@@ -498,10 +498,15 @@ function openCodeText(message) {
 }
 
 export function openCodeTerminalEvent(session, messages, fallbackTime = Date.now()) {
-  const assistants = (Array.isArray(messages) ? messages : [])
+  const list = Array.isArray(messages) ? messages : []
+  const latestUser = list.filter((message) => message?.info?.role === "user")
+    .sort((left, right) => openCodeTimestamp(right) - openCodeTimestamp(left))[0] || null
+  const assistants = list
     .filter((message) => message?.info?.role === "assistant")
+    .filter((message) => !latestUser || openCodeTimestamp(message) >= openCodeTimestamp(latestUser))
     .sort((left, right) => openCodeTimestamp(right) - openCodeTimestamp(left))
   const assistant = assistants[0] || null
+  if (!assistant) return null
   const error = assistant?.info?.error || null
   const timestamp = openCodeTimestamp(assistant) || Number(session?.updated || 0) || fallbackTime
   const createdAt = new Date(timestamp > 0 && timestamp < 1e12 ? timestamp * 1000 : timestamp).toISOString()
@@ -517,6 +522,7 @@ export function openCodeTerminalEvent(session, messages, fallbackTime = Date.now
     backend: "opencode",
     instanceId: session?.instanceId || null,
     id: `opencode-poll:${fingerprint}`,
+    turnId: String(latestUser?.info?.id || assistant?.info?.id || ""),
     type: error ? "session.error" : "session.idle",
     createdAt,
     sessionId: String(session?.id || ""),
@@ -745,7 +751,7 @@ async function main(options = {}) {
     client.on("terminal", (event) => { void handleCodexTerminal(event).catch((error) => recordError("codex-event", error)) })
     client.on("serverRequest", (message) => { void handleCodexServerRequest(message, client).catch((error) => recordError("codex-request", error)) })
     client.on("diagnostic", (message) => { if (message) log("INFO", `Codex app-server: ${message}`) })
-    await client.startMonitor({ intervalMs: Number(config.codexPollIntervalMs || 5000), limit: Number(config.codexMonitorLimit || 100) })
+    await client.startMonitor({ intervalMs: Number(config.codexPollIntervalMs || 15000), limit: Number(config.codexMonitorLimit || 30) })
     if (clearRecoveredError(state, "codex-reconnect", "codex-startup")) saveState()
     return client
   }
@@ -882,7 +888,8 @@ async function main(options = {}) {
       try {
         log("INFO", `OpenCode terminal candidate session=${session.id} status=${current.status}`)
         const messages = await recentSessionMessages(session, 12)
-        await handleCodexTerminal(openCodeTerminalEvent(session, messages))
+        const terminal = openCodeTerminalEvent(session, messages)
+        if (terminal) await handleCodexTerminal(terminal)
         openCodeObserved.set(key, current)
       } catch (error) {
         log("WARN", `OpenCode terminal poll failed session=${session.id}: ${error.message}`)
@@ -1287,14 +1294,15 @@ async function main(options = {}) {
     const id = String(event.id || "")
     if (id && !state.processedEventIds.includes(id)) state.processedEventIds.push(id)
     state.processedEventIds = state.processedEventIds.slice(-500)
-    if (event.sessionId) state.recentEvents[migrateSessionState(event)] = { fingerprint: eventFingerprint(event), at: event.createdAt || new Date().toISOString() }
+    if (event.sessionId) state.recentEvents[migrateSessionState(event)] = { fingerprint: eventFingerprint(event), turnId: event.turnId || null, at: event.createdAt || new Date().toISOString() }
     saveState()
   }
 
   function eventAlreadyHandled(event, activeQueueItem = null) {
     if (event.id && state.processedEventIds.includes(String(event.id))) return true
-    if (activeQueueItem && Date.parse(event.createdAt || 0) >= Date.parse(activeQueueItem.dispatchedAt || 0)) return false
     const recent = event.sessionId ? state.recentEvents[migrateSessionState(event)] : null
+    if (event.turnId && recent?.turnId === event.turnId) return true
+    if (activeQueueItem && Date.parse(event.createdAt || 0) >= Date.parse(activeQueueItem.dispatchedAt || 0)) return false
     return Boolean(recent
       && recent.fingerprint === eventFingerprint(event)
       && Math.abs(Date.parse(event.createdAt || 0) - Date.parse(recent.at || 0)) < 15000)
@@ -2316,10 +2324,15 @@ async function main(options = {}) {
     const promptAt = messageTimestamp(prompt)
     const assistant = messages.filter((message) => message?.info?.role === "assistant" && messageTimestamp(message) >= promptAt)
       .sort((a, b) => messageTimestamp(b) - messageTimestamp(a))[0]
+    const assistantError = assistant?.info?.error || null
+    const recoveryError = assistantError
+      ? String(assistantError?.data?.message || assistantError?.message || assistantError?.name || "OpenCode task failed")
+      : !assistant ? "OpenCode task ended without an assistant reply" : null
     const payload = {
       version: 1,
       id: `recovered-${randomUUID()}`,
-      type: "session.idle",
+      type: recoveryError ? "session.error" : "session.idle",
+      turnId: String(prompt?.info?.id || ""),
       backend: session.backend || "opencode",
       createdAt: new Date().toISOString(),
       sessionId: session.id,
@@ -2328,6 +2341,7 @@ async function main(options = {}) {
       serverUrl: session.serverUrl,
       summary: session.summary || null,
       excerpt: assistant ? messageText(assistant).slice(0, 1800) : "",
+      error: recoveryError,
       recovered: true,
     }
     atomicJson(join(eventsDir, `${Date.now()}-${payload.id}.json`), payload)
@@ -2430,6 +2444,7 @@ async function main(options = {}) {
         const event = readJson(path)
         if (!event) { rmSync(path, { force: true }); continue }
         if (event.nextAttemptAt && Date.parse(event.nextAttemptAt) > Date.now()) continue
+        if (event.backend === "opencode" && event.type === "session.idle" && Date.now() - Date.parse(event.createdAt || 0) < 2500) continue
         if (Date.now() - Date.parse(event.createdAt || 0) > 7 * 86400000) { rmSync(path, { force: true }); continue }
         const eventKey = event.sessionId ? migrateSessionState(event) : null
         const activeQueueItem = eventKey ? state.queueInFlight[eventKey] : null
@@ -2597,6 +2612,10 @@ function selfTest() {
     { info: { id: "m", role: "assistant", time: { completed: 1700000000000 } }, parts: [{ type: "text", text: "done" }] },
   ])
   if (polled.type !== "session.idle" || polled.excerpt !== "done" || !polled.id.startsWith("opencode-poll:")) throw new Error("OpenCode terminal polling event failed")
+  if (openCodeTerminalEvent({ id: "s" }, [
+    { info: { id: "old", role: "assistant", time: { completed: 100 } }, parts: [{ type: "text", text: "previous task" }] },
+    { info: { id: "current", role: "user", time: { created: 200 } }, parts: [{ type: "text", text: "stop" }] },
+  ]) !== null) throw new Error("aborted OpenCode turn must not reuse a previous answer")
   if (!sessionStateIdentity({ backend: "opencode", serverUrl: "http://127.0.0.1:4096", id: "event", sessionId: "session" }).endsWith(":session")) throw new Error("event session identity failed")
   if (parseCommand("/remove 2").arg !== 2) throw new Error("parse remove failed")
   if (parseCommand("hello") !== null) throw new Error("free text must not execute")

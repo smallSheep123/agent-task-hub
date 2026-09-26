@@ -124,7 +124,6 @@ export const TelegramBridgePlugin = async ({ client, directory, serverUrl }) => 
   return {
     event: async ({ event }) => {
       const idle = event?.type === "session.idle"
-        || (event?.type === "session.status" && event?.properties?.status?.type === "idle")
       const failed = event?.type === "session.error"
       if (!idle && !failed) return
       // Multiple OpenCode windows can emit terminal events at the same time.
@@ -136,21 +135,34 @@ export const TelegramBridgePlugin = async ({ client, directory, serverUrl }) => 
       const sessionId = event.properties?.sessionID
       let session = null
       let excerpt = ""
+      let turnId = ""
+      let assistantError = null
+      let hasCurrentAssistant = false
       if (sessionId) {
         try {
           session = unwrap(await client.session.get({ path: { id: sessionId }, query: { directory } }))
           const messages = unwrap(await client.session.messages({ path: { id: sessionId }, query: { directory, limit: 12 } }))
-          excerpt = lastAssistantText(messages)
+          const list = Array.isArray(messages) ? messages : []
+          const user = [...list].reverse().find((message) => message?.info?.role === "user")
+          const assistant = [...list].reverse().find((message) => message?.info?.role === "assistant"
+            && Number(message?.info?.time?.created || 0) >= Number(user?.info?.time?.created || 0))
+          turnId = String(user?.info?.id || assistant?.info?.id || "")
+          hasCurrentAssistant = Boolean(assistant)
+          assistantError = assistant?.info?.error || null
+          excerpt = assistant ? lastAssistantText([assistant]) : ""
         } catch {
           // Completion notification should still be delivered when details cannot be read.
         }
       }
 
+      if (idle && !hasCurrentAssistant) return
+      const terminalError = failed ? event.properties?.error || assistantError || { name: "OpenCode task failed" } : assistantError
       const payload = {
         version: 1,
         backend: "opencode",
         id: randomUUID(),
-        type: failed ? "session.error" : "session.idle",
+        type: terminalError ? "session.error" : "session.idle",
+        turnId,
         createdAt: new Date().toISOString(),
         sessionId: sessionId || null,
         title: session?.title || "OpenCode session",
@@ -158,7 +170,7 @@ export const TelegramBridgePlugin = async ({ client, directory, serverUrl }) => 
         serverUrl: localServer,
         summary: session?.summary || null,
         excerpt,
-        error: failed ? String(event.properties?.error?.data?.message || event.properties?.error?.name || "Unknown error").slice(0, 1000) : null,
+        error: terminalError ? String(terminalError?.data?.message || terminalError?.message || terminalError?.name || "Unknown error").slice(0, 1000) : null,
       }
       await atomicJson(join(eventsDir, `${Date.now()}-${payload.id}.json`), payload)
     },

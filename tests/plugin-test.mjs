@@ -33,12 +33,25 @@ assert.equal(instance.adapterVersion, 1)
 assert.equal(instance.auth.kind, "windows-dpapi-basic")
 assert.ok(instance.auth.passwordProtected)
 assert.doesNotMatch(instanceText, /temporary-local-password/)
-assert.equal(events.length, 2)
+assert.equal(events.length, 1)
 const event = JSON.parse(await readFile(join(root, "events", events[0]), "utf8"))
 assert.equal(event.sessionId, "ses_test")
 assert.equal(event.backend, "opencode")
 assert.equal(event.title, "测试项目")
 assert.match(event.excerpt, /全部通过/)
+
+client.session.messages = async () => ({ data: [
+  { info: { id: "user-aborted", role: "user", time: { created: 200 } }, parts: [{ type: "text", text: "Stop" }] },
+  { info: { id: "old-assistant", role: "assistant", time: { created: 100 } }, parts: [{ type: "text", text: "Old answer" }] },
+] })
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_test" } } })
+assert.equal((await readdir(join(root, "events"))).length, 1, "aborted turn must not reuse a previous answer")
+await hooks.event({ event: { type: "session.error", properties: { sessionID: "ses_test", error: { name: "AbortError" } } } })
+const errorFiles = await readdir(join(root, "events"))
+assert.equal(errorFiles.length, 2)
+const errorEvent = JSON.parse(await readFile(join(root, "events", errorFiles.find((name) => name !== events[0])), "utf8"))
+assert.equal(errorEvent.type, "session.error")
+assert.equal(errorEvent.turnId, "user-aborted")
 
 const blockedRoot = await mkdtemp(join(tmpdir(), "agent-task-hub-opencode-blocked-"))
 process.env.AGENT_TASK_HUB_DATA_DIR = blockedRoot

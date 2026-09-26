@@ -93,9 +93,8 @@ try {
   const eventCount = 500
   await measure("openCodeConcurrent500Ms", async () => {
     await Promise.all(Array.from({ length: eventCount }, (_, index) => hooks.event({
-      event: { type: index % 2 ? "session.idle" : "session.status", properties: {
+      event: { type: "session.idle", properties: {
         sessionID: `ses_stress_${String(index).padStart(4, "0")}`,
-        ...(index % 2 ? {} : { status: { type: "idle" } }),
       } },
     })))
   })

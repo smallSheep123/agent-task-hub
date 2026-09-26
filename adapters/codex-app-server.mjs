@@ -575,7 +575,7 @@ export class CodexAppServer extends EventEmitter {
     if (this.monitorBusy || !this.ready) return
     this.monitorBusy = true
     try {
-      const response = await this.request("thread/list", { limit, archived: false, sortKey: "recency_at", sortDirection: "desc", sourceKinds: CODEX_SOURCE_KINDS }, this.listRequestTimeoutMs)
+      const response = await this.request("thread/list", { limit, archived: false, sortKey: "recency_at", sortDirection: "desc", sourceKinds: CODEX_SOURCE_KINDS }, Math.min(this.listRequestTimeoutMs, 30000))
       for (const listed of response?.data || []) {
         if (!isUserFacingCodexThread(listed)) continue
         this.#rememberThread(listed)

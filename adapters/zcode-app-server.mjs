@@ -159,6 +159,12 @@ export function zcodeSessionNeedsEventPoll(session, { baseline = false, previous
   return (subscribed || resident) && now - Number(lastPolledAt || 0) >= recoveryIntervalMs
 }
 
+export function zcodeIndexCompletion(previous, current, monitorStartedAt) {
+  if (!previous || current.updatedAt <= previous.updatedAt || current.updatedAt < monitorStartedAt - 5000) return false
+  return ["completed", "error", "failed", "cancelled"].includes(current.status)
+    && (previous.status !== current.status || previous.updatedAt < current.updatedAt)
+}
+
 export function zcodeTerminalEvent(event, session = null) {
   const failed = event?.type === "turn.failed"
   const cancelled = event?.type === "turn.completed" && event?.payload?.resultType === "cancelled"
@@ -356,6 +362,8 @@ export class ZCodeAppServer extends EventEmitter {
     this.activeStartedAt = new Map()
     this.sessionVersions = new Map()
     this.sessionPolledAt = new Map()
+    this.indexSnapshot = new Map()
+    this.monitorStartedAt = 0
     this.monitorTimer = null
     this.monitorBusy = false
     this.monitorInitialized = false
@@ -593,7 +601,14 @@ export class ZCodeAppServer extends EventEmitter {
 
   async #pollSessionEvents(hubSession) {
     const previous = this.eventSeq.get(hubSession.id)
-    const result = await this.request("session/events", { sessionId: hubSession.id, ...(previous === undefined ? {} : { afterSeq: previous }), limit: 200 })
+    let result
+    try { result = await this.request("session/events", { sessionId: hubSession.id, ...(previous === undefined ? {} : { afterSeq: previous }), limit: 200 }) }
+    catch (error) {
+      if (!/session is not active/i.test(error.message)) throw error
+      this.sessionVersions.set(hubSession.id, timestamp(hubSession.updatedAt || hubSession.createdAt))
+      this.sessionPolledAt.set(hubSession.id, Date.now())
+      return
+    }
     const events = Array.isArray(result?.events) ? result.events : []
     const maximum = events.reduce((max, event) => Math.max(max, Number(event?.seq || event?.sequenceNumber || 0)), previous || 0)
     this.eventSeq.set(hubSession.id, maximum)
@@ -607,11 +622,44 @@ export class ZCodeAppServer extends EventEmitter {
     this.sessionPolledAt.set(hubSession.id, Date.now())
   }
 
+  #pollDesktopTaskIndex() {
+    const path = join(this.dataRoot, "tasks-index.sqlite")
+    if (!existsSync(path)) return
+    const db = new DatabaseSync(path, { readOnly: true })
+    let rows
+    try {
+      db.exec("PRAGMA busy_timeout=3000")
+      rows = db.prepare("SELECT task_id, task_status, updated_at, title, workspace_path FROM tasks WHERE deleted = 0 AND archived = 0 ORDER BY updated_at DESC LIMIT 200").all()
+    } finally { db.close() }
+    for (const row of rows) {
+      const id = String(row.task_id || "")
+      if (!id) continue
+      const current = { status: String(row.task_status || "").toLowerCase(), updatedAt: timestamp(row.updated_at) }
+      const previous = this.indexSnapshot.get(id)
+      this.indexSnapshot.set(id, current)
+      if (this.subscriptions.has(id) || this.residentSessions.has(id)) continue
+      if (!zcodeIndexCompletion(previous, current, this.monitorStartedAt)) continue
+      const failed = current.status === "error" || current.status === "failed"
+      const cancelled = current.status === "cancelled"
+      this.emit("terminal", {
+        version: 1, backend: "zcode", instanceId: ZCODE_INSTANCE_ID,
+        id: `zcode-index:${id}:${current.updatedAt}`,
+        turnId: `index:${current.updatedAt}`,
+        type: failed ? "session.error" : cancelled ? "session.interrupted" : "session.idle",
+        status: failed ? "failed" : cancelled ? "interrupted" : "completed",
+        createdAt: new Date(current.updatedAt).toISOString(), sessionId: id,
+        title: String(row.title || "ZCode session"), directory: String(row.workspace_path || ""),
+        excerpt: "", error: failed ? "ZCode task failed" : null,
+      })
+    }
+  }
+
   async #pollEvents() {
     if (this.monitorBusy) return
     if (this.monitorInitialized && Date.now() < this.backgroundPausedUntil) return
     this.monitorBusy = true
     try {
+      try { this.#pollDesktopTaskIndex() } catch (error) { this.emit("diagnostic", `ZCode task index monitor failed: ${error.message}`) }
       const listedSessions = await this.listSessions({ limit: 200 })
       const sessionsById = new Map(listedSessions.map((session) => [session.id, session]))
       for (const [sessionId, info] of this.sessions) {
@@ -634,6 +682,7 @@ export class ZCodeAppServer extends EventEmitter {
 
   async startMonitor({ intervalMs = 5000 } = {}) {
     if (this.monitorTimer) clearInterval(this.monitorTimer)
+    this.monitorStartedAt = Date.now()
     void this.#pollEvents().catch((error) => this.emit("diagnostic", error.message))
     this.monitorTimer = setInterval(() => { void this.#pollEvents().catch((error) => this.emit("diagnostic", error.message)) }, Math.max(2000, intervalMs))
     this.monitorTimer.unref?.()

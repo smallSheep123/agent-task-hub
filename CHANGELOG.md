@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## 0.5.5 - 2026-09-26
+
+### Fixed
+
+- Reduced Codex desktop completion polling from 60 to 15 seconds and capped a stalled monitor request at 30 seconds.
+- Read ZCode Desktop's local task index for external task completions when its separate App Server cannot access the desktop's active session events.
+- Ignored redundant OpenCode status-idle events and correlated terminal events with the current user turn, preventing an aborted task from reusing a previous answer or generating multiple success/failure notices.
+
+### Verified
+
+- Passed the full test suite, including a task-index transition test for ZCode and an aborted-turn regression test for OpenCode.
+
 ## 0.5.4 - 2026-09-23
 
 ### Changed
