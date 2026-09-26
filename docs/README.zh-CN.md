@@ -4,13 +4,13 @@
 
 Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控制中心。当前版本已经通过一个机器人支持 OpenCode Desktop、Codex、ZCode 和 Pi，并隔离各自的会话、队列、事件与审批。
 
-> 当前状态：OpenCode、Codex 与 ZCode 适配器均已实现。Codex 支持私有 `stdio`，也可以选择只绑定 `127.0.0.1` 的官方共享 App Server；ZCode 使用桌面端自带的 App Server，通过私有 `stdio` 通信。
+> 当前状态：OpenCode、Codex、ZCode 与 Pi 接入均已实现。Codex 支持私有 `stdio`，也可以选择只绑定 `127.0.0.1` 的官方共享 App Server；ZCode 使用桌面端自带的 App Server，通过私有 `stdio` 通信。
 
 ## 已有能力
 
-- OpenCode、Codex 或 ZCode 任务完成、失败或中断时发送 Telegram 通知。
-- 一个聚合首页提供 OpenCode、Codex 和 ZCode 三个入口；选择会话后自动进入对应 Agent 模式。
-- 聚合首页作为实时运行看板，分别显示 OpenCode、Codex 正在执行的会话、运行时间、项目目录、排队数量和审批/选择阻塞状态。
+- OpenCode、Codex、ZCode 或 Pi 任务完成、失败或中断时发送 Telegram 通知。
+- 一个聚合首页提供 OpenCode、Codex、ZCode 和 Pi 四个入口；选择会话后自动进入对应 Agent 模式。
+- 聚合首页作为实时运行看板，分别显示各 Agent 正在执行的会话、运行时间、项目目录和排队数量；OpenCode、Codex 与 ZCode 还显示支持的审批/选择阻塞状态。
 - 分页浏览会话，并按标题或项目目录搜索。
 - 立即发送指令，或用 `/add`、`/batch` 为每个会话建立串行队列。
 - 重启后恢复队列，过滤重复事件，避免重复通知和重复执行。
@@ -21,13 +21,13 @@ Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控�
 
 ## 快速开始
 
-需要 Windows 10/11、Node.js 22 或更新版本、通过 [@BotFather](https://t.me/BotFather) 创建的 Telegram Bot，以及至少一个本机 Agent：OpenCode Desktop、Codex Desktop/CLI 或 ZCode Desktop。
+需要 Windows 10/11、Node.js 22 或更新版本、通过 [@BotFather](https://t.me/BotFather) 创建的 Telegram Bot，以及至少一个本机 Agent：OpenCode Desktop、Codex Desktop/CLI、ZCode Desktop 或 Pi。
 
 1. 下载或克隆本仓库。
 2. 双击 `Bridge-Manager.cmd`。
 3. 选择“简体中文”或“English”。程序会记住选择，也可以在主菜单输入 `L` 随时切换。
 4. 选择“首次配置并启动”，粘贴 Bot Token，给机器人发送 `/start`，确认检测到的 Telegram 账号。
-5. 重启一次 OpenCode Desktop，然后给机器人发送 `/home` 并进入 **OpenCode**。
+5. 给机器人发送 `/home`，选择要使用的 Agent。使用 OpenCode Desktop 时需重启一次以加载适配器；使用 Pi 时按下文安装可选扩展。
 
 安装程序会把适配器复制到 `%USERPROFILE%\.config\opencode\plugins\agent-task-hub.js`，把运行数据保存到 `%USERPROFILE%\.config\agent-task-hub`，并创建名为 `Agent Task Hub` 的计划任务。这些名称和旧的 OpenCode Telegram Bridge 完全分开，不会共用配置、运行状态或自启任务。
 

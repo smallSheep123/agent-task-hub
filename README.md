@@ -6,15 +6,15 @@
 
 Agent Task Hub is a Windows-first, multilingual Telegram control center for local coding agents. The current release supports OpenCode Desktop, Codex, ZCode, and Pi through one bot, with isolated sessions, queues, events, and approvals.
 
-> Status: OpenCode, Codex, and ZCode adapters are implemented. Codex supports private `stdio` and an optional shared official App Server bound only to `127.0.0.1`; ZCode uses its bundled local App Server over private `stdio`.
+> Status: OpenCode, Codex, ZCode, and Pi integrations are implemented. Codex supports private `stdio` and an optional shared official App Server bound only to `127.0.0.1`; ZCode uses its bundled local App Server over private `stdio`.
 
 Pi uses an extension inside each Pi terminal. Each terminal process is a separate Hub instance, even when two terminals open the same session file.
 
 ## What it does
 
-- Sends a Telegram message when connected OpenCode, Codex, or ZCode work completes, fails, or is interrupted.
-- Provides one aggregated home with separate OpenCode, Codex, and ZCode entrances; selecting a session switches into that agent's mode.
-- Turns the aggregated home into a live dashboard with each agent's running conversations, elapsed time, project path, queued work, and approval/question blockers.
+- Sends a Telegram message when connected OpenCode, Codex, ZCode, or Pi work completes, fails, or is interrupted.
+- Provides one aggregated home with separate OpenCode, Codex, ZCode, and Pi entrances; selecting a session switches into that agent's mode.
+- Turns the aggregated home into a live dashboard with each agent's running conversations, elapsed time, project path, and queued work. Supported approval/question blockers are shown for OpenCode, Codex, and ZCode.
 - Browses and searches sessions with project paths and pagination.
 - Sends prompts immediately or runs per-session sequential queues with `/add` and `/batch`.
 - Recovers queues after restarts and suppresses duplicate events and notifications.
@@ -25,13 +25,13 @@ Pi uses an extension inside each Pi terminal. Each terminal process is a separat
 
 ## Quick start
 
-Requirements: Windows 10/11, Node.js 22+, a Telegram bot from [@BotFather](https://t.me/BotFather), and at least one supported local agent: OpenCode Desktop, Codex Desktop/CLI, or ZCode Desktop.
+Requirements: Windows 10/11, Node.js 22+, a Telegram bot from [@BotFather](https://t.me/BotFather), and at least one supported local agent: OpenCode Desktop, Codex Desktop/CLI, ZCode Desktop, or Pi.
 
 1. Download or clone this repository.
 2. Double-click `Bridge-Manager.cmd`.
 3. Choose **简体中文** or **English**. The choice is remembered and can be changed later with `L`.
 4. Choose first-time setup, paste the BotFather token, send `/start` to the bot, and confirm your Telegram account.
-5. Restart OpenCode Desktop once, then send `/home` to the bot and enter **OpenCode**.
+5. Send `/home` to the bot and choose your agent. If you use OpenCode Desktop, restart it once to load the installed adapter. If you use Pi, install its optional extension as described below.
 
 Setup installs the adapter as `%USERPROFILE%\.config\opencode\plugins\agent-task-hub.js`, stores runtime data in `%USERPROFILE%\.config\agent-task-hub`, and creates an `Agent Task Hub` scheduled task. These names are intentionally separate from the earlier OpenCode Telegram Bridge project, so both codebases do not share state or startup entries.
 
