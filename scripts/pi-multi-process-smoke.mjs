@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync }
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { setTimeout as sleep } from "node:timers/promises"
+import { randomUUID } from "node:crypto"
+import { fileURLToPath } from "node:url"
 import { findPiHistory, listPiSessions, piResumeCommand, sendPiCommand } from "../adapters/pi-bridge.mjs"
 
 const testRoot = mkdtempSync(join(tmpdir(), "hub-pi-multi-"))
@@ -14,6 +16,7 @@ const provider = process.env.PI_HUB_TEST_PROVIDER || Object.keys(providers)[0] |
 const model = process.env.PI_HUB_TEST_MODEL || providers[provider]?.models?.[0]?.id || ""
 const modelArgs = provider && model ? ["--provider", provider, "--model", model] : []
 const children = []
+const processOutput = []
 const dirs = [join(testRoot, "alpha"), join(testRoot, "beta")]
 for (const directory of dirs) mkdirSync(directory, { recursive: true })
 
@@ -24,7 +27,7 @@ const waitFor = async (predicate, label, timeoutMs = 30000) => {
     if (value) return value
     await sleep(100)
   }
-  throw new Error(`Timed out: ${label}`)
+  throw new Error(`Timed out: ${label}; processes=${JSON.stringify(children.map((child, index) => ({ pid: child.pid, exitCode: child.exitCode, signalCode: child.signalCode, output: processOutput[index]?.slice(-800) || "" })))}`)
 }
 const processed = (instanceId) => {
   const state = JSON.parse(readFileSync(join(dataRoot, "state.json"), "utf8"))
@@ -36,8 +39,10 @@ try {
     const child = spawn(process.execPath, [launcher, "--mode", "rpc", "--session-dir", join(directory, "sessions"), "--offline", ...modelArgs, "--no-tools"], {
       cwd: directory, env: { ...process.env, AGENT_TASK_HUB_DATA_DIR: dataRoot }, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
     })
-    child.stdout.on("data", () => {})
-    child.stderr.on("data", () => {})
+    const index = children.length
+    processOutput[index] = ""
+    child.stdout.on("data", (chunk) => { processOutput[index] += String(chunk) })
+    child.stderr.on("data", (chunk) => { processOutput[index] += String(chunk) })
     children.push(child)
   }
   const sessions = await waitFor(() => {
@@ -60,13 +65,18 @@ try {
   if (!listPiSessions(dataRoot).some((item) => item.instanceId === sessions[1].instanceId)) throw new Error("Beta disappeared with Alpha")
   const savedFile = readdirSync(join(dirs[0], "sessions")).find((name) => name.endsWith(".jsonl"))
   if (!savedFile) throw new Error("Pi did not persist Alpha's session")
-  const resumed = spawn(process.execPath, [launcher, "--mode", "rpc", "--session", join(dirs[0], "sessions", savedFile), "--offline", ...modelArgs, "--no-tools"], {
+  const workerId = randomUUID()
+  const workerScript = fileURLToPath(new URL("./pi-worker.mjs", import.meta.url))
+  const resumed = spawn(process.execPath, [workerScript, join(dirs[0], "sessions", savedFile), dirs[1], workerId], {
     cwd: dirs[1], env: { ...process.env, AGENT_TASK_HUB_DATA_DIR: dataRoot }, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
   })
   resumed.stdout.on("data", () => {})
   resumed.stderr.on("data", () => {})
   children.push(resumed)
-  const resumedSession = await waitFor(() => listPiSessions(dataRoot).find((item) => item.id === sessions[0].id && item.instanceId !== sessions[0].instanceId), "Alpha session resumed from Beta directory")
+  const resumedSession = await waitFor(() => listPiSessions(dataRoot).find((item) => item.id === sessions[0].id && item.workerId === workerId), "Alpha session resumed by background worker")
+  const workerStatus = JSON.parse(readFileSync(join(dataRoot, "pi", "workers", `${workerId}.json`), "utf8"))
+  if (!["starting", "ready"].includes(workerStatus.state)) throw new Error("Pi background worker did not start")
+  if (resumedSession.directory !== dirs[0]) throw new Error("Pi resumed in the wrong project directory")
   console.log(`PI_MULTI_PROCESS=PASS ALPHA=${sessions[0].id}/${sessions[0].instanceId} BETA=${sessions[1].id}/${sessions[1].instanceId} RESUMED_CWD=${resumedSession.directory}`)
 } finally {
   for (const child of children) child.kill()
@@ -84,6 +94,13 @@ try {
   const historyDir = join(dataRoot, "pi", "history")
   if (existsSync(historyDir)) for (const name of readdirSync(historyDir)) {
     const path = join(historyDir, name)
+    let item
+    try { item = JSON.parse(readFileSync(path, "utf8")) } catch { continue }
+    if (String(item.sessionFile || "").startsWith(`${testRoot}\\`)) rmSync(path, { force: true })
+  }
+  const workersDir = join(dataRoot, "pi", "workers")
+  if (existsSync(workersDir)) for (const name of readdirSync(workersDir)) {
+    const path = join(workersDir, name)
     let item
     try { item = JSON.parse(readFileSync(path, "utf8")) } catch { continue }
     if (String(item.sessionFile || "").startsWith(`${testRoot}\\`)) rmSync(path, { force: true })

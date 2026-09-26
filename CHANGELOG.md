@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## 0.7.0 - 2026-09-26
+
+### Added
+
+- Listed running and saved Pi sessions with name-first titles, first-prompt excerpts, original folders, recent activity, and running/closed state.
+- Added a closed-session detail view and explicit background resume action; an already-running canonical session file is reused rather than opened twice.
+- Kept restored Pi processes alive independently of the Telegram gateway and added a real multi-process restore smoke test plus a mocked Telegram list/detail test.
+
 ## 0.6.1 - 2026-09-26
 
 ### Added

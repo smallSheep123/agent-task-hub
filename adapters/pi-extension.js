@@ -44,7 +44,7 @@ export default function piAgentTaskHub(pi) {
   })
   const heartbeat = () => {
     if (!context) return
-    atomicJson(instancePath, { instanceId, processId: process.pid, ...identity(),
+    atomicJson(instancePath, { instanceId, processId: process.pid, workerId: process.env.AGENT_TASK_HUB_WORKER_ID || null, ...identity(),
       status: busy ? "busy" : "idle", startedAt, updatedAt: new Date().toISOString(),
       latestReply, lastError: latestError, lastFinishedAt, lastRunId })
   }

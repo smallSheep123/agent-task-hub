@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto"
-import { spawnSync } from "node:child_process"
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { spawn, spawnSync } from "node:child_process"
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -13,6 +13,7 @@ import { approvalOptionsForRequest, approvalResponseForRequest, CodexAppServer, 
 import { chooseOpenCodeQuestionOption, completeOpenCodeQuestion, nextOpenCodeQuestionIndex, normalizeOpenCodeQuestion, openCodeQuestionAnswers, openCodeQuestionToken, submitOpenCodeQuestion } from "../adapters/opencode-question.mjs"
 import { ZCodeAppServer, zcodeTerminalEvent } from "../adapters/zcode-app-server.mjs"
 import { findPiHistory, listPiSessions, piResumeCommand, sendPiCommand } from "../adapters/pi-bridge.mjs"
+import { listPiCatalog, piSessionTitle } from "../adapters/pi-catalog.mjs"
 
 const appDir = dirname(fileURLToPath(import.meta.url))
 const dataRoot = process.env.AGENT_TASK_HUB_DATA_DIR || join(homedir(), ".config", "agent-task-hub")
@@ -23,6 +24,8 @@ const eventsDir = join(dataRoot, "events")
 const logsDir = join(dataRoot, "logs")
 const lockPath = join(dataRoot, "controller.lock")
 const decryptScript = join(appDir, "decrypt-token.ps1")
+const piWorkerScript = join(appDir, "..", "scripts", "pi-worker.mjs")
+const piAgentDir = process.env.AGENT_TASK_HUB_PI_AGENT_DIR || join(homedir(), ".pi", "agent")
 const credentialCache = new Map()
 let i18n = createI18n("en-US")
 const t = (key, ...args) => i18n.t(key, ...args)
@@ -457,7 +460,7 @@ async function discoverOpenCodeSessions() {
 }
 
 async function discoverSessions({ force = false } = {}) {
-  const [openCode, codex, zcode] = await Promise.all([
+  const [openCode, codex, zcode, pi] = await Promise.all([
     sessionDiscoveryCache.get("OpenCode", discoverOpenCodeSessions, { force }),
     sessionDiscoveryCache.get("Codex", async () => {
       const client = await ensureCodexClient()
@@ -467,13 +470,14 @@ async function discoverSessions({ force = false } = {}) {
       const client = await ensureZCodeClient()
       return client.listSessions({ limit: 200 })
     }, { force }),
+    sessionDiscoveryCache.get("Pi", () => listPiCatalog(dataRoot, { agentDir: piAgentDir }), { force }),
   ])
   const updated = (item) => {
     let value = Number(item.updated || item.updatedAt || 0)
     if (value > 0 && value < 1e12) value *= 1000
     return value
   }
-  return [...openCode, ...codex, ...zcode, ...listPiSessions(dataRoot)].sort((left, right) => updated(right) - updated(left))
+  return [...openCode, ...codex, ...zcode, ...pi].sort((left, right) => updated(right) - updated(left))
 }
 
 function latestAssistant(messages) {
@@ -549,18 +553,18 @@ export function sessionStateIdentity(target) {
 async function getSessionView(session) {
   if (session.backend === "pi") {
     const live = listPiSessions(dataRoot).find((item) => item.id === session.id && item.instanceId === session.instanceId)
-    const history = findPiHistory(dataRoot, session.id)
+    const history = session.sessionFile ? session : findPiHistory(dataRoot, session.id)
     if (!live) {
       if (!history) throw new Error("Pi terminal session is offline and has no saved resume information")
       const command = piResumeCommand(history)
       return i18n.language === "zh-CN"
-        ? `Pi · ${history.title}\n状态：终端已关闭\n原目录：${history.directory}\n会话文件：${history.sessionFile}\n\n请在电脑 PowerShell 执行：\n${command}`
-        : `Pi · ${history.title}\nStatus: terminal closed\nOriginal directory: ${history.directory}\nSession file: ${history.sessionFile}\n\nRun in PowerShell on the computer:\n${command}`
+        ? `Pi · ${piSessionTitle(history)}\n状态：已关闭\n首条提问：${history.firstPrompt || "暂无"}\n最近活动：${new Date(history.updatedAt || Date.now()).toLocaleString("zh-CN")}\n原目录：${history.directory}\n会话文件：${history.sessionFile}\n\n电脑端恢复命令：\n${command}`
+        : `Pi · ${piSessionTitle(history)}\nStatus: closed\nFirst prompt: ${history.firstPrompt || "none"}\nLast activity: ${new Date(history.updatedAt || Date.now()).toLocaleString("en-US")}\nOriginal directory: ${history.directory}\nSession file: ${history.sessionFile}\n\nResume on the computer:\n${command}`
     }
     const resume = piResumeCommand(live)
     return i18n.language === "zh-CN"
-      ? `Pi · ${live.title}\n状态：${live.status}\n目录：${live.directory}\n模型：${live.model || "未知"}\n思维强度：${live.thinkingLevel || "未知"}\n终端实例：${live.instanceId}\n\n最近回复：\n${live.latestReply || "暂无"}${resume ? `\n\n日后恢复命令：\n${resume}` : ""}`
-      : `Pi · ${live.title}\nStatus: ${live.status}\nDirectory: ${live.directory}\nModel: ${live.model || "unknown"}\nThinking: ${live.thinkingLevel || "unknown"}\nTerminal instance: ${live.instanceId}\n\nLatest reply:\n${live.latestReply || "none"}${resume ? `\n\nResume later:\n${resume}` : ""}`
+      ? `Pi · ${piSessionTitle({ ...live, ...session })}\n状态：${live.status}\n目录：${live.directory}\n模型：${live.model || "未知"}\n思维强度：${live.thinkingLevel || "未知"}\n终端实例：${live.instanceId}\n\n最近回复：\n${live.latestReply || "暂无"}${resume ? `\n\n日后恢复命令：\n${resume}` : ""}`
+      : `Pi · ${piSessionTitle({ ...live, ...session })}\nStatus: ${live.status}\nDirectory: ${live.directory}\nModel: ${live.model || "unknown"}\nThinking: ${live.thinkingLevel || "unknown"}\nTerminal instance: ${live.instanceId}\n\nLatest reply:\n${live.latestReply || "none"}${resume ? `\n\nResume later:\n${resume}` : ""}`
   }
   if ((session.backend || "opencode") === "codex") {
     const client = await ensureCodexClient()
@@ -1479,6 +1483,14 @@ async function main(options = {}) {
     return text.length > max ? `${text.slice(0, Math.max(1, max - 1))}…` : text
   }
 
+  function piListStatus(session) {
+    return session.status === "closed" ? "⚪" : isRunningStatus(session.status) ? "▶️" : "🟢"
+  }
+
+  function sessionListTitle(session) {
+    return session.backend === "pi" ? piSessionTitle(session) : session.title
+  }
+
   function requestCounts(backend) {
     if (backend === "pi") return { approvals: 0, questions: 0 }
     if (backend === "opencode") return {
@@ -1603,7 +1615,7 @@ async function main(options = {}) {
     const running = sessions.filter((session) => isRunningStatus(session.status))
     const visible = running.slice(0, 3)
     const starts = await Promise.all(visible.map((session) => taskStartedAt(session)))
-    const online = backend === "pi" ? sessions.length > 0 : backend === "opencode" ? loadInstances().length > 0
+    const online = backend === "pi" ? sessions.some((session) => session.status !== "closed") : backend === "opencode" ? loadInstances().length > 0
       : backend === "codex" ? Boolean(codexClient?.ready && codexClient.isRunning)
         : Boolean(zcodeClient?.ready && zcodeClient.isRunning)
     const lines = [t("homeAgentSummary", online ? "🟢" : "🔴", backendText(backend), running.length, waitingCountForSessions(sessions), sessions.length)]
@@ -1612,7 +1624,7 @@ async function main(options = {}) {
       const start = starts[index]
       const elapsed = start ? durationText(new Date(start).toISOString()) : t("unknownDuration")
       const blocker = sessionBlocker(session)
-      lines.push(t("homeRunningTask", index + 1, shortLine(session.title, 100), elapsed, blocker ? t("homeBlocked", blocker) : "", shortLine(session.directory, 110) || t("none")))
+      lines.push(t("homeRunningTask", index + 1, shortLine(sessionListTitle(session), 100), elapsed, blocker ? t("homeBlocked", blocker) : "", shortLine(session.directory, 110) || t("none")))
     })
     if (running.length > visible.length) lines.push(t("homeMoreRunning", running.length - visible.length))
     return { text: lines.join("\n"), running }
@@ -1623,7 +1635,7 @@ async function main(options = {}) {
       [{ text: t("buttonOpenCode"), callback_data: "agent:opencode" }, { text: t("buttonCodex"), callback_data: "agent:codex" }, { text: t("buttonZCode"), callback_data: "agent:zcode" }, { text: "Pi", callback_data: "agent:pi" }],
     ]
     for (const session of activeSessions.slice(0, 4)) rows.push([{
-      text: `▶ ${backendText(session.backend)} · ${shortLine(session.title, 38)}`,
+      text: `▶ ${backendText(session.backend)} · ${shortLine(sessionListTitle(session), 38)}`,
       callback_data: encodeSessionAction("select", session),
     }])
     rows.push([{ text: t("buttonAllSessions"), callback_data: "allsessions" }, { text: t("refresh"), callback_data: "home" }])
@@ -1675,6 +1687,57 @@ async function main(options = {}) {
     return commandSessions(1, "", "opencode")
   }
 
+  const piResumePending = new Set()
+
+  async function resumePiSession(session) {
+    if (session.backend !== "pi" || !session.sessionFile) throw new Error("A saved Pi session must be selected")
+    if (!isAbsolute(session.sessionFile)) throw new Error("Pi session file path must be absolute")
+    if (!existsSync(session.sessionFile) || !statSync(session.sessionFile).isFile()) throw new Error("The saved Pi session file no longer exists")
+    const file = realpathSync.native(session.sessionFile)
+    const key = file.toLowerCase()
+    if (!existsSync(session.directory) || !statSync(session.directory).isDirectory()) throw new Error("The original Pi project directory no longer exists")
+    const saved = (await listPiCatalog(dataRoot, { agentDir: piAgentDir })).find((item) => item.sessionFile && realpathSync.native(item.sessionFile).toLowerCase() === key)
+    if (!saved || saved.id !== session.id || saved.directory !== session.directory) throw new Error("The saved Pi session has changed; refresh the list")
+    const alreadyLive = () => listPiSessions(dataRoot).find((item) => {
+      try { return item.sessionFile && realpathSync.native(item.sessionFile).toLowerCase() === key }
+      catch { return false }
+    })
+    if (alreadyLive()) return { session: alreadyLive(), alreadyRunning: true }
+    if (piResumePending.has(key)) throw new Error("This Pi session is already starting")
+    const workersDir = join(dataRoot, "pi", "workers")
+    if (existsSync(workersDir)) for (const name of readdirSync(workersDir)) {
+      if (!/^[a-f0-9-]{36}\.json$/.test(name)) continue
+      const worker = readJson(join(workersDir, name))
+      if (worker?.state !== "starting" || !worker.sessionFile) continue
+      try { if (realpathSync.native(worker.sessionFile).toLowerCase() !== key) continue }
+      catch { continue }
+      try { process.kill(Number(worker.workerPid), 0); throw new Error("This Pi session is already starting") }
+      catch (error) { if (error?.message === "This Pi session is already starting") throw error }
+    }
+    piResumePending.add(key)
+    try {
+      const workerId = randomUUID()
+      const child = spawn(process.execPath, [piWorkerScript, file, session.directory, workerId], {
+        cwd: session.directory, env: { ...process.env, AGENT_TASK_HUB_DATA_DIR: dataRoot },
+        detached: true, windowsHide: true, stdio: "ignore",
+      })
+      child.unref()
+      for (let i = 0; i < 150; i += 1) {
+        const live = alreadyLive()
+        if (live) {
+          await sessionDiscoveryCache.get("Pi", () => listPiCatalog(dataRoot, { agentDir: piAgentDir }), { force: true })
+          await sessionDiscoveryCache.whenIdle(["Pi"])
+          const discovered = sessionDiscoveryCache.snapshot("Pi").find((item) => item.id === live.id && item.instanceId === live.instanceId)
+          return { session: discovered || live, alreadyRunning: false }
+        }
+        const worker = readJson(join(workersDir, `${workerId}.json`))
+        if (worker?.state === "failed" || worker?.state === "exited") throw new Error(`Pi background process failed: ${worker.error || worker.code || worker.state}`)
+        await sleep(100)
+      }
+      throw new Error("Pi background process is still starting; refresh the session list shortly")
+    } finally { piResumePending.delete(key) }
+  }
+
   async function selectSession(session) {
     const selected = {
       id: session.id,
@@ -1682,17 +1745,24 @@ async function main(options = {}) {
       instanceId: session.instanceId || null,
       title: session.title,
       directory: session.directory,
+      sessionFile: session.sessionFile || null,
+      sessionName: session.sessionName || null,
+      firstPrompt: session.firstPrompt || null,
       serverUrl: (session.backend || "opencode") === "opencode" ? loopbackBase(session.serverUrl) : null,
       status: session.status || "idle",
       auth: session.auth || null,
     }
     selectAgentSession(state, selected)
     saveState()
-    await send(t("selected", backendText(selected.backend), selected.title, selected.id, selected.directory), { reply_markup: { inline_keyboard: [
-      [{ text: t("viewDetails"), callback_data: encodeSessionAction("show", selected) }, { text: t("append"), callback_data: encodeSessionAction("addhelp", selected) }],
-      [{ text: t("viewQueue"), callback_data: encodeSessionAction("queue", selected) }, { text: t("stopTask"), callback_data: encodeSessionAction("stopask", selected) }],
+    const closedPi = selected.backend === "pi" && selected.status === "closed"
+    if (closedPi) return send(await getSessionView(selected), { reply_markup: { inline_keyboard: [
+      [{ text: i18n.language === "zh-CN" ? "▶️ 后台恢复" : "▶️ Resume in background", callback_data: encodeSessionAction("pirestore", selected) }],
       [{ text: t("buttonAllSessions"), callback_data: "allsessions" }, { text: t("buttonHome"), callback_data: "home" }],
     ] } })
+    const rows = [[{ text: t("viewDetails"), callback_data: encodeSessionAction("show", selected) }, { text: t("append"), callback_data: encodeSessionAction("addhelp", selected) }],
+      [{ text: t("viewQueue"), callback_data: encodeSessionAction("queue", selected) }, { text: t("stopTask"), callback_data: encodeSessionAction("stopask", selected) }]]
+    rows.push([{ text: t("buttonAllSessions"), callback_data: "allsessions" }, { text: t("buttonHome"), callback_data: "home" }])
+    await send(t("selected", backendText(selected.backend), sessionListTitle(selected), selected.id, selected.directory), { reply_markup: { inline_keyboard: rows } })
   }
 
   async function commandSessions(page = 1, query = "", backend = "all") {
@@ -1700,7 +1770,7 @@ async function main(options = {}) {
     const all = filterAgentSessions(discovered, backend)
     const needle = String(query || "").trim().toLowerCase()
     const filtered = needle
-      ? all.filter((item) => `${item.title}\n${item.directory}`.toLowerCase().includes(needle))
+      ? all.filter((item) => `${item.title}\n${item.firstPrompt || ""}\n${item.directory}`.toLowerCase().includes(needle))
       : all
     const pageSize = Math.max(4, Math.min(8, Number(config.sessionPageSize || 6)))
     const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize))
@@ -1714,10 +1784,14 @@ async function main(options = {}) {
     const numberBadges = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"]
     const lines = sessions.map((item, index) => {
       const selectedMark = state.selected?.id === item.id && (state.selected?.backend || "opencode") === (item.backend || "opencode") && (item.backend !== "pi" || state.selected?.instanceId === item.instanceId) ? "✅ " : ""
+      if (item.backend === "pi") {
+        const when = new Date(item.updatedAt || 0).toLocaleString(i18n.language, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })
+        return `${numberBadges[index] || `${index + 1}.`} ${selectedMark}${piListStatus(item)} Pi · ${shortLine(sessionListTitle(item), 60)} · ${when}\n📁 ${item.directory}`
+      }
       return `${numberBadges[index] || `${index + 1}.`} ${selectedMark}${backendText(item.backend)} · ${item.status}\n📝「${item.title}」\n📁 ${item.directory}`
     })
     const keyboard = sessions.map((item, index) => [{
-      text: `${state.selected?.id === item.id && (state.selected?.backend || "opencode") === (item.backend || "opencode") && (item.backend !== "pi" || state.selected?.instanceId === item.instanceId) ? "✅ " : ""}${index + 1}. ${backendText(item.backend)} · ${item.title}`.slice(0, 52),
+      text: `${state.selected?.id === item.id && (state.selected?.backend || "opencode") === (item.backend || "opencode") && (item.backend !== "pi" || state.selected?.instanceId === item.instanceId) ? "✅ " : ""}${index + 1}. ${backendText(item.backend)} · ${sessionListTitle(item)}`.slice(0, 52),
       callback_data: encodeSessionAction("select", item),
     }])
     const nav = []
@@ -1915,6 +1989,10 @@ async function main(options = {}) {
     if (!selected) return send(t("selectFirst"))
     if (command.name === "show") return send(await getSessionView(selected))
     if (command.name === "queue") return send(queueSummary(selected))
+    if (selected.backend === "pi" && ["send", "add", "batch", "resume", "stop"].includes(command.name)
+      && !listPiSessions(dataRoot).some((item) => item.id === selected.id && item.instanceId === selected.instanceId)) {
+      return send(i18n.language === "zh-CN" ? "该 Pi 会话已关闭。请在会话详情中点击「后台恢复」，恢复后再发送指令。" : "This Pi session is closed. Open its details and tap Resume in background before sending prompts.")
+    }
     if (command.name === "steer") {
       if ((selected.backend || "opencode") !== "codex") return send(t("steerCodexOnly"))
       try {
@@ -2213,6 +2291,17 @@ async function main(options = {}) {
         const session = await resolveActionSession(target)
         if (!session) throw new Error(t("sessionUnavailable"))
         await send(await getSessionView(session))
+      } else if (data.startsWith("pirestore:")) {
+        await telegram("answerCallbackQuery", { callback_query_id: query.id })
+        callbackAnswered = true
+        const target = decodeSessionAction(data, "pirestore")
+        const session = await resolveActionSession(target)
+        if (!session || session.backend !== "pi") throw new Error(t("sessionUnavailable"))
+        const result = await resumePiSession(session)
+        await send(i18n.language === "zh-CN"
+          ? result.alreadyRunning ? "该 Pi 会话已经在运行，已切换到现有进程。" : "Pi 会话已在后台恢复，可以继续发送指令。"
+          : result.alreadyRunning ? "This Pi session is already running; switched to its existing process." : "Pi session resumed in the background. You can send prompts now.")
+        await selectSession(result.session)
       } else if (data.startsWith("addhelp:")) {
         await telegram("answerCallbackQuery", { callback_query_id: query.id })
         callbackAnswered = true

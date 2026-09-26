@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { findPiHistory, listPiSessions, piResumeCommand, sendPiCommand } from "../adapters/pi-bridge.mjs"
+import { listPiCatalog, piSessionTitle } from "../adapters/pi-catalog.mjs"
 import { decodeSessionAction, encodeSessionAction } from "../app/agent-context.mjs"
 
 const root = mkdtempSync(join(tmpdir(), "agent-hub-pi-"))
@@ -11,7 +12,7 @@ const handlers = new Map()
 const sent = []
 const sessionId = "12345678-1234-1234-1234-123456789abc"
 const sessionFile = join(root, "saved.jsonl")
-writeFileSync(sessionFile, '{}\n')
+writeFileSync(sessionFile, `${JSON.stringify({ type: "session", id: sessionId, cwd: "C:\\test", timestamp: new Date().toISOString() })}\n${JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: "Inspect the first failure\nand explain it" }] } })}\n${JSON.stringify({ type: "session_info", name: "Named work" })}\n`)
 const context = {
   cwd: "C:\\test", model: { provider: "test", id: "model" }, thinkingLevel: "low",
   sessionManager: { getSessionId: () => sessionId, getSessionFile: () => sessionFile, getSessionName: () => "Pi test" },
@@ -26,6 +27,9 @@ try {
   assert.equal(session.status, "idle")
   assert.equal(session.sessionFile, sessionFile)
   assert.equal(findPiHistory(root, sessionId)?.sessionFile, sessionFile)
+  const [liveCatalog] = await listPiCatalog(root, { agentDir: join(root, "empty-agent") })
+  assert.equal(liveCatalog.firstPrompt, "Inspect the first failure and explain it")
+  assert.equal(piSessionTitle(liveCatalog), "Named work")
   assert.match(piResumeCommand(session), /--session/)
   assert.deepEqual(decodeSessionAction(encodeSessionAction("select", session), "select"), { backend: "pi", instanceId: session.instanceId, id: sessionId })
   assert.equal((await sendPiCommand(root, session, "send", "hello")).ok, true)
@@ -45,6 +49,9 @@ try {
   await handlers.get("session_shutdown")()
   assert.equal(listPiSessions(root).length, 0)
   assert.equal(findPiHistory(root, sessionId)?.sessionFile, sessionFile)
+  const [savedCatalog] = await listPiCatalog(root, { agentDir: join(root, "empty-agent") })
+  assert.equal(savedCatalog.status, "closed")
+  assert.equal(savedCatalog.firstPrompt, "Inspect the first failure and explain it")
   console.log("PI_BRIDGE_TEST=PASS")
 } finally {
   rmSync(root, { recursive: true, force: true })

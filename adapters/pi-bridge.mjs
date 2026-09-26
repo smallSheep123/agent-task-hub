@@ -4,15 +4,15 @@ import { join } from "node:path"
 import { homedir } from "node:os"
 
 const readJson = (path) => { try { return JSON.parse(readFileSync(path, "utf8")) } catch { return null } }
-
 export function listPiSessions(dataRoot, now = Date.now()) {
   const root = join(dataRoot, "pi", "instances")
   if (!existsSync(root)) return []
   return readdirSync(root).filter((name) => /^[a-f0-9]{12}\.json$/.test(name)).map((name) => readJson(join(root, name)))
     .filter((item) => item?.instanceId && item?.sessionId && now - Date.parse(item.updatedAt || 0) < 20000)
-    .map((item) => ({ id: item.sessionId, backend: "pi", instanceId: item.instanceId,
+    .map((item) => ({ id: item.sessionId, backend: "pi", instanceId: item.instanceId, workerId: item.workerId || null,
       title: item.title || "Pi session", directory: item.directory || "", status: item.status || "idle",
       sessionFile: item.sessionFile || null,
+      firstPrompt: item.firstPrompt || "", sessionName: item.sessionName || "",
       updatedAt: Date.parse(item.updatedAt), dashboardStartedAt: item.startedAt ? Date.parse(item.startedAt) : 0,
       model: item.model || null, thinkingLevel: item.thinkingLevel || null,
       latestReply: item.latestReply || "", lastError: item.lastError || null,
