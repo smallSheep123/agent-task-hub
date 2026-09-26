@@ -470,7 +470,7 @@ async function discoverSessions({ force = false } = {}) {
       const client = await ensureZCodeClient()
       return client.listSessions({ limit: 200 })
     }, { force }),
-    sessionDiscoveryCache.get("Pi", () => listPiCatalog(dataRoot, { agentDir: piAgentDir }), { force }),
+    sessionDiscoveryCache.get("Pi", () => listPiCatalog(dataRoot, { agentDir: piAgentDir }), { force, waitForStale: true }),
   ])
   const updated = (item) => {
     let value = Number(item.updated || item.updatedAt || 0)

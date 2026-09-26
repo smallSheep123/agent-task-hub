@@ -31,11 +31,16 @@ export class SessionDiscoveryCache {
     return source.inFlight
   }
 
-  async get(name, loader, { force = false } = {}) {
+  async get(name, loader, { force = false, waitForStale = false } = {}) {
     const source = this.#source(name)
     const stale = force || !source.initialized || Date.now() - source.refreshedAt >= this.ttlMs
     const refresh = stale ? this.#refresh(name, loader, source) : source.inFlight
-    if (source.initialized) return source.sessions
+    if (source.initialized) {
+      if (stale && waitForStale && refresh) {
+        await Promise.race([refresh, new Promise((resolve) => setTimeout(resolve, this.initialWaitMs))])
+      }
+      return source.sessions
+    }
     if (!refresh || this.initialWaitMs === 0) return source.sessions
     return Promise.race([
       refresh,

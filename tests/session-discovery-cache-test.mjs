@@ -37,4 +37,18 @@ await delay(25)
 assert.deepEqual(await cache.get("zcode", async () => { throw new Error("offline") }), [{ id: "two", title: "updated" }, { id: "three" }])
 await delay(0)
 assert.deepEqual(errors, [["zcode", "offline"]])
+
+const piCache = new SessionDiscoveryCache({ ttlMs: 10, initialWaitMs: 20 })
+assert.deepEqual(await piCache.get("pi", async () => [{ id: "closed", status: "closed" }], { waitForStale: true }), [{ id: "closed", status: "closed" }])
+await delay(15)
+const refreshed = await piCache.get("pi", async () => [{ id: "live", status: "idle" }], { waitForStale: true })
+assert.deepEqual(refreshed, [{ id: "live", status: "idle" }])
+
+await delay(15)
+let finishPiRefresh
+const timedOut = await piCache.get("pi", () => new Promise((resolve) => { finishPiRefresh = resolve }), { waitForStale: true })
+assert.deepEqual(timedOut, [{ id: "live", status: "idle" }])
+finishPiRefresh([{ id: "busy", status: "busy" }])
+await piCache.whenIdle(["pi"])
+assert.deepEqual(piCache.snapshot("pi"), [{ id: "busy", status: "busy" }])
 console.log("SESSION_DISCOVERY_CACHE_TEST=PASS")
