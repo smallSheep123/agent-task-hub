@@ -12,6 +12,7 @@ import { telegramMarkdownBody } from "./telegram-markdown.mjs"
 import { approvalOptionsForRequest, approvalResponseForRequest, CodexAppServer, terminalEventFromNotification } from "../adapters/codex-app-server.mjs"
 import { chooseOpenCodeQuestionOption, completeOpenCodeQuestion, nextOpenCodeQuestionIndex, normalizeOpenCodeQuestion, openCodeQuestionAnswers, openCodeQuestionToken, submitOpenCodeQuestion } from "../adapters/opencode-question.mjs"
 import { ZCodeAppServer, zcodeTerminalEvent } from "../adapters/zcode-app-server.mjs"
+import { listPiSessions, sendPiCommand } from "../adapters/pi-bridge.mjs"
 
 const appDir = dirname(fileURLToPath(import.meta.url))
 const dataRoot = process.env.AGENT_TASK_HUB_DATA_DIR || join(homedir(), ".config", "agent-task-hub")
@@ -226,6 +227,7 @@ export function parseCommand(text) {
   if (/^\/opencode(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "opencode" }
   if (/^\/codex(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "codex" }
   if (/^\/zcode(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "zcode" }
+  if (/^\/pi(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "pi" }
   if ((match = value.match(/^\/new(?:@[A-Za-z0-9_]+)?\s+([A-Za-z0-9._-]{1,64})\s*\|\s*([\s\S]{1,3500})$/i))) return { name: "new", arg: { alias: match[1], prompt: match[2].trim() } }
   if (/^\/new(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(value)) return { name: "new", arg: null }
   if (/^\/help(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "help" }
@@ -471,7 +473,7 @@ async function discoverSessions({ force = false } = {}) {
     if (value > 0 && value < 1e12) value *= 1000
     return value
   }
-  return [...openCode, ...codex, ...zcode].sort((left, right) => updated(right) - updated(left))
+  return [...openCode, ...codex, ...zcode, ...listPiSessions(dataRoot)].sort((left, right) => updated(right) - updated(left))
 }
 
 function latestAssistant(messages) {
@@ -545,6 +547,13 @@ export function sessionStateIdentity(target) {
 }
 
 async function getSessionView(session) {
+  if (session.backend === "pi") {
+    const live = listPiSessions(dataRoot).find((item) => item.id === session.id && item.instanceId === session.instanceId)
+    if (!live) throw new Error("Pi terminal session is offline or has switched sessions")
+    return i18n.language === "zh-CN"
+      ? `Pi · ${live.title}\n状态：${live.status}\n目录：${live.directory}\n模型：${live.model || "未知"}\n思维强度：${live.thinkingLevel || "未知"}\n终端实例：${live.instanceId}\n\n最近回复：\n${live.latestReply || "暂无"}`
+      : `Pi · ${live.title}\nStatus: ${live.status}\nDirectory: ${live.directory}\nModel: ${live.model || "unknown"}\nThinking: ${live.thinkingLevel || "unknown"}\nTerminal instance: ${live.instanceId}\n\nLatest reply:\n${live.latestReply || "none"}`
+  }
   if ((session.backend || "opencode") === "codex") {
     const client = await ensureCodexClient()
     const thread = await client.readThread(session.id)
@@ -593,6 +602,7 @@ async function main(options = {}) {
   const botToken = process.env.AGENT_TASK_HUB_BOT_TOKEN || decryptToken()
   const apiBase = `${telegramApiRoot(process.env.AGENT_TASK_HUB_TELEGRAM_API_ROOT)}/bot${botToken}`
   const botCommands = i18n.commands()
+  botCommands.splice(5, 0, { command: "pi", description: i18n.language === "zh-CN" ? "进入 Pi 模式" : "Enter Pi mode" })
   const state = readJson(statePath, { updateOffset: 0, selected: null, sessionMap: [] })
   initializeAgentContext(state)
   state.queues ||= {}
@@ -1316,6 +1326,7 @@ async function main(options = {}) {
 
   async function currentSessionStatus(session) {
     try {
+      if (session.backend === "pi") return listPiSessions(dataRoot).find((item) => item.id === session.id && item.instanceId === session.instanceId)?.status || "unavailable"
       if ((session.backend || "opencode") === "codex") {
         const client = await ensureCodexClient(config.codexCommand || null)
         return await client.status(session.id)
@@ -1350,6 +1361,8 @@ async function main(options = {}) {
         const client = await ensureZCodeClient(config.zcodeBundle || null)
         const turn = await client.sendPrompt(session.id, item.text)
         item.turnId = turn?.id || null
+      } else if (session.backend === "pi") {
+        await sendPiCommand(dataRoot, session, "send", item.text)
       } else {
         await requestSessionJson(session, `/session/${encodeURIComponent(session.id)}/prompt_async`, {
           method: "POST",
@@ -1364,6 +1377,11 @@ async function main(options = {}) {
       log("AUDIT", `queue dispatched session=${session.id} item=${item.id} remaining=${queue.length}`)
       return { item, remaining: queue.length }
     } catch (error) {
+      if (session.backend === "pi" && error?.code === "PI_ACK_UNCERTAIN") {
+        state.queuePaused[key] = true
+        saveState()
+        throw error
+      }
       queue.unshift(item)
       delete state.queueInFlight[key]
       saveState()
@@ -1435,16 +1453,17 @@ async function main(options = {}) {
       ? `${t("online")} · ${t(String(codexClient.transport || "").startsWith("shared") ? "codexShared" : "codexPrivate")}`
       : t("offline")
     const zcode = zcodeClient?.ready && zcodeClient.isRunning ? t("online") : t("offline")
-    return compact(t("health", openCode, codex, zcode, instances.length, sessions.length, state.selected?.title || t("notSelected"), approvals, running, waiting, paused, durationText(startedAt), lastError))
+    const piCount = listPiSessions(dataRoot).length
+    return compact(`${t("health", openCode, codex, zcode, instances.length, sessions.length, state.selected?.title || t("notSelected"), approvals, running, waiting, paused, durationText(startedAt), lastError)}\nPi ${i18n.language === "zh-CN" ? "终端" : "terminals"}：${piCount}`)
   }
 
   function backendText(backend) {
-    return backend === "codex" ? t("agentCodex") : backend === "zcode" ? t("agentZCode") : t("agentOpenCode")
+    return backend === "codex" ? t("agentCodex") : backend === "zcode" ? t("agentZCode") : backend === "pi" ? "Pi" : t("agentOpenCode")
   }
 
   function modeText() {
     if (state.viewMode !== "agent") return t("globalMode")
-    return state.activeBackend === "codex" ? t("codexMode") : state.activeBackend === "zcode" ? t("zcodeMode") : t("openCodeMode")
+    return state.activeBackend === "codex" ? t("codexMode") : state.activeBackend === "zcode" ? t("zcodeMode") : state.activeBackend === "pi" ? "Pi" : t("openCodeMode")
   }
 
   function shortLine(value, max = 90) {
@@ -1453,6 +1472,7 @@ async function main(options = {}) {
   }
 
   function requestCounts(backend) {
+    if (backend === "pi") return { approvals: 0, questions: 0 }
     if (backend === "opencode") return {
       approvals: Object.values(state.permissionRequests).filter((item) => !item.resolvedAt).length,
       questions: Object.values(state.openCodeQuestions).filter((item) => !item.resolvedAt).length,
@@ -1477,7 +1497,7 @@ async function main(options = {}) {
       const requests = Object.values(state.codexRequests).filter((item) => !item.resolvedAt && item.connectionId === codexClient?.connectionId && item.params?.threadId === session.id)
       approval = requests.some((item) => item.kind === "approval")
       question = requests.some((item) => item.kind === "question")
-    } else {
+    } else if (backend === "zcode") {
       const requests = Object.values(state.zcodeRequests).filter((item) => !item.resolvedAt && item.connectionId === zcodeClient?.connectionId && item.params?.sessionId === session.id)
       approval = requests.some((item) => item.kind === "approval")
       question = requests.some((item) => item.kind === "question")
@@ -1575,7 +1595,7 @@ async function main(options = {}) {
     const running = sessions.filter((session) => isRunningStatus(session.status))
     const visible = running.slice(0, 3)
     const starts = await Promise.all(visible.map((session) => taskStartedAt(session)))
-    const online = backend === "opencode" ? loadInstances().length > 0
+    const online = backend === "pi" ? sessions.length > 0 : backend === "opencode" ? loadInstances().length > 0
       : backend === "codex" ? Boolean(codexClient?.ready && codexClient.isRunning)
         : Boolean(zcodeClient?.ready && zcodeClient.isRunning)
     const lines = [t("homeAgentSummary", online ? "🟢" : "🔴", backendText(backend), running.length, waitingCountForSessions(sessions), sessions.length)]
@@ -1592,7 +1612,7 @@ async function main(options = {}) {
 
   function homeKeyboard(activeSessions = []) {
     const rows = [
-      [{ text: t("buttonOpenCode"), callback_data: "agent:opencode" }, { text: t("buttonCodex"), callback_data: "agent:codex" }, { text: t("buttonZCode"), callback_data: "agent:zcode" }],
+      [{ text: t("buttonOpenCode"), callback_data: "agent:opencode" }, { text: t("buttonCodex"), callback_data: "agent:codex" }, { text: t("buttonZCode"), callback_data: "agent:zcode" }, { text: "Pi", callback_data: "agent:pi" }],
     ]
     for (const session of activeSessions.slice(0, 4)) rows.push([{
       text: `▶ ${backendText(session.backend)} · ${shortLine(session.title, 38)}`,
@@ -1604,15 +1624,15 @@ async function main(options = {}) {
 
   async function buildHomePayload() {
     const sessions = await enrichCodexDashboardActivity(await discoverSessions())
-    const [openCode, codex, zcode] = await Promise.all([homeAgentSection(sessions, "opencode"), homeAgentSection(sessions, "codex"), homeAgentSection(sessions, "zcode")])
+    const [openCode, codex, zcode, pi] = await Promise.all([homeAgentSection(sessions, "opencode"), homeAgentSection(sessions, "codex"), homeAgentSection(sessions, "zcode"), homeAgentSection(sessions, "pi")])
     const openRequests = requestCounts("opencode")
     const codexRequests = requestCounts("codex")
     const zcodeRequests = requestCounts("zcode")
     const requestSummary = t("homePendingRequests", t("homeRequestCount", openRequests.approvals, openRequests.questions), t("homeRequestCount", codexRequests.approvals, codexRequests.questions), t("homeRequestCount", zcodeRequests.approvals, zcodeRequests.questions))
     const selected = state.selected ? `${backendText(state.selected.backend)} · ${state.selected.title}` : t("notSelected")
     const lastError = state.lastError ? t("homeRecentError", state.lastError.scope, shortLine(state.lastError.message, 180)) : ""
-    const text = [t("homeTitle"), t("homeSelected", selected), requestSummary, openCode.text, codex.text, zcode.text, lastError].filter(Boolean).join("\n\n")
-    return { text, reply_markup: homeKeyboard([...openCode.running, ...codex.running, ...zcode.running]), sessions, running: [...openCode.running, ...codex.running, ...zcode.running] }
+    const text = [t("homeTitle"), t("homeSelected", selected), requestSummary, openCode.text, codex.text, zcode.text, pi.text, lastError].filter(Boolean).join("\n\n")
+    return { text, reply_markup: homeKeyboard([...openCode.running, ...codex.running, ...zcode.running, ...pi.running]), sessions, running: [...openCode.running, ...codex.running, ...zcode.running, ...pi.running] }
   }
 
   async function commandHome() {
@@ -1624,6 +1644,7 @@ async function main(options = {}) {
 
   async function commandAgent(backend) {
     enterAgentMode(state, backend)
+    if (backend === "pi") { saveState(); return commandSessions(1, "", "pi") }
     if (backend === "codex") {
       saveState()
       try {
@@ -1684,11 +1705,11 @@ async function main(options = {}) {
     if (!filtered.length) return send(needle ? t("noSearch", compact(query, 80)) : t("noSessions"), { reply_markup: { inline_keyboard: [[{ text: t("buttonHome"), callback_data: "home" }]] } })
     const numberBadges = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"]
     const lines = sessions.map((item, index) => {
-      const selectedMark = state.selected?.id === item.id && (state.selected?.backend || "opencode") === (item.backend || "opencode") ? "✅ " : ""
+      const selectedMark = state.selected?.id === item.id && (state.selected?.backend || "opencode") === (item.backend || "opencode") && (item.backend !== "pi" || state.selected?.instanceId === item.instanceId) ? "✅ " : ""
       return `${numberBadges[index] || `${index + 1}.`} ${selectedMark}${backendText(item.backend)} · ${item.status}\n📝「${item.title}」\n📁 ${item.directory}`
     })
     const keyboard = sessions.map((item, index) => [{
-      text: `${state.selected?.id === item.id && (state.selected?.backend || "opencode") === (item.backend || "opencode") ? "✅ " : ""}${index + 1}. ${backendText(item.backend)} · ${item.title}`.slice(0, 52),
+      text: `${state.selected?.id === item.id && (state.selected?.backend || "opencode") === (item.backend || "opencode") && (item.backend !== "pi" || state.selected?.instanceId === item.instanceId) ? "✅ " : ""}${index + 1}. ${backendText(item.backend)} · ${item.title}`.slice(0, 52),
       callback_data: encodeSessionAction("select", item),
     }])
     const nav = []
@@ -1697,8 +1718,8 @@ async function main(options = {}) {
     nav.push({ text: `${currentPage}/${pageCount}`, callback_data: "noop" })
     if (currentPage < pageCount) nav.push({ text: t("next"), callback_data: `${prefix}:${currentPage + 1}` })
     keyboard.push(nav)
-    keyboard.push([{ text: t("buttonOpenCode"), callback_data: "agent:opencode" }, { text: t("buttonCodex"), callback_data: "agent:codex" }, { text: t("buttonZCode"), callback_data: "agent:zcode" }, { text: t("buttonHome"), callback_data: "home" }])
-    const heading = needle ? t("searchHeading", compact(query, 80)) : backend === "opencode" ? t("openCodeSessionsHeading") : backend === "codex" ? t("codexSessionsHeading") : backend === "zcode" ? t("zcodeSessionsHeading") : t("sessionsHeading")
+    keyboard.push([{ text: t("buttonOpenCode"), callback_data: "agent:opencode" }, { text: t("buttonCodex"), callback_data: "agent:codex" }, { text: t("buttonZCode"), callback_data: "agent:zcode" }, { text: "Pi", callback_data: "agent:pi" }, { text: t("buttonHome"), callback_data: "home" }])
+    const heading = needle ? t("searchHeading", compact(query, 80)) : backend === "opencode" ? t("openCodeSessionsHeading") : backend === "codex" ? t("codexSessionsHeading") : backend === "zcode" ? t("zcodeSessionsHeading") : backend === "pi" ? "Pi" : t("sessionsHeading")
     await send(t("page", heading, filtered.length, currentPage, pageCount, lines.join("\n\n")), { reply_markup: { inline_keyboard: keyboard } })
   }
 
@@ -1706,9 +1727,9 @@ async function main(options = {}) {
     if (!target?.id) return null
     const backend = target.backend || "opencode"
     const cached = [...(state.sessionMap || []), state.selected].filter(Boolean)
-      .find((item) => item.id === target.id && (item.backend || "opencode") === backend)
+      .find((item) => item.id === target.id && (item.backend || "opencode") === backend && (backend !== "pi" || item.instanceId === target.instanceId))
     if (cached) return cached
-    return (await discoverSessions()).find((item) => item.id === target.id && (item.backend || "opencode") === backend) || null
+    return (await discoverSessions()).find((item) => item.id === target.id && (item.backend || "opencode") === backend && (backend !== "pi" || item.instanceId === target.instanceId)) || null
   }
 
   async function resolveSelected() {
@@ -1717,18 +1738,21 @@ async function main(options = {}) {
     if (state.activeBackend === "opencode") loopbackBase(state.selected.serverUrl)
     else if (state.activeBackend === "codex") await attachCodexAdapter()
     else if (state.activeBackend === "zcode") await attachZCodeAdapter()
+    else if (state.activeBackend === "pi") return state.selected
     else return null
     return state.selected
   }
 
   async function handleCommand(command) {
     if (!command) return send(t("unknownCommand"))
-    if (command.name === "help") return send(t("help"))
+    if (command.name === "help") return send(`${t("help")}\n/pi — ${i18n.language === "zh-CN" ? "查看本机 Pi 终端会话" : "Pi terminal sessions"}`)
     if (command.name === "home") return commandHome()
     if (command.name === "opencode") return commandAgent("opencode")
     if (command.name === "codex") return commandAgent("codex")
     if (command.name === "zcode") return commandAgent("zcode")
+    if (command.name === "pi") return commandAgent("pi")
     if (command.name === "new") {
+      if (state.activeBackend === "pi") return send(i18n.language === "zh-CN" ? "请先在 Pi 终端创建会话，然后发送 /pi 选择。" : "Create a session in the Pi terminal, then use /pi to select it.")
       if (!command.arg) return send(t("newUsage"))
       const backend = state.viewMode === "agent" && state.activeBackend === "zcode" ? "zcode" : "codex"
       const projects = backend === "zcode" ? (config.zcodeProjects || config.codexProjects || {}) : (config.codexProjects || {})
@@ -1789,7 +1813,7 @@ async function main(options = {}) {
         ? `${t("online")} · ${t(String(codexClient.transport || "").startsWith("shared") ? "codexShared" : "codexPrivate")}`
         : t("offline")
       const zcodeStatus = zcodeClient?.ready && zcodeClient.isRunning ? t("online") : t("offline")
-      return send(t("status", loadInstances().length, codexStatus, zcodeStatus, modeText(), state.selected ? `${backendText(state.selected.backend)} · ${state.selected.title}` : t("notSelected")))
+      return send(`${t("status", loadInstances().length, codexStatus, zcodeStatus, modeText(), state.selected ? `${backendText(state.selected.backend)} · ${state.selected.title}` : t("notSelected"))}\nPi ${i18n.language === "zh-CN" ? "终端" : "terminals"}：${listPiSessions(dataRoot).length}`)
     }
     if (command.name === "health") return send(await healthText())
     if (command.name === "approvals") {
@@ -1997,6 +2021,20 @@ async function main(options = {}) {
         selected.status = "busy"
         selected.updatedAt = Date.now()
         sessionDiscoveryCache.remember("ZCode", selected)
+      } else if (selected.backend === "pi") {
+        const live = listPiSessions(dataRoot).find((item) => item.id === selected.id && item.instanceId === selected.instanceId)
+        if (live?.status === "busy" || state.queueInFlight[migrateSessionState(selected)]) {
+          const queue = waitingQueue(selected)
+          const [item] = makeQueueItems([command.arg])
+          item.source = "send"
+          queue.push(item)
+          state.queueStartOnIdle[migrateSessionState(selected)] = true
+          saveState()
+          return send(t("added", "busy", queue.length))
+        }
+        await sendPiCommand(dataRoot, selected, "send", command.arg)
+        selected.status = "busy"
+        saveState()
       } else {
         const id = encodeURIComponent(selected.id)
         await requestSessionJson(selected, `/session/${id}/prompt_async`, {
@@ -2206,6 +2244,8 @@ async function main(options = {}) {
         } else if (selected.backend === "zcode") {
           const client = await ensureZCodeClient(config.zcodeBundle || null)
           await client.interrupt(selected.id)
+        } else if (selected.backend === "pi") {
+          await sendPiCommand(dataRoot, selected, "abort")
         } else {
           await requestSessionJson(selected, `/session/${encodeURIComponent(selected.id)}/abort`, { method: "POST" })
         }
@@ -2290,6 +2330,17 @@ async function main(options = {}) {
   function messageText(message) { return openCodeText(message) }
 
   async function synthesizeRecoveredCompletion(session, item) {
+    if (session.backend === "pi") {
+      const live = listPiSessions(dataRoot).find((candidate) => candidate.id === session.id && candidate.instanceId === session.instanceId)
+      if (!live?.lastRunId || Date.parse(live.lastFinishedAt || 0) < Date.parse(item.dispatchedAt || 0)) return false
+      atomicJson(join(eventsDir, `${Date.now()}-${randomUUID()}.json`), {
+        version: 1, backend: "pi", instanceId: session.instanceId, id: `pi:${session.instanceId}:${live.lastRunId}`,
+        turnId: live.lastRunId, type: live.lastError ? "session.error" : "session.idle",
+        createdAt: live.lastFinishedAt, sessionId: session.id, title: live.title,
+        directory: live.directory, excerpt: live.latestReply, error: live.lastError, recovered: true,
+      })
+      return true
+    }
     if ((session.backend || "opencode") === "codex") {
       const client = await ensureCodexClient(config.codexCommand || null)
       const thread = await client.readThread(session.id)
@@ -2365,6 +2416,12 @@ async function main(options = {}) {
       try {
         if (await synthesizeRecoveredCompletion(session, item)) {
           log("INFO", `recovered completed queue item session=${session.id} item=${item.id}`)
+          continue
+        }
+        if (session.backend === "pi") {
+          state.queuePaused[key] = true
+          saveState()
+          log("WARN", `Pi queue paused after uncertain recovery session=${session.id} item=${item.id}`)
           continue
         }
         waitingQueue(session).unshift(item)
@@ -2573,7 +2630,7 @@ async function check() {
   if (!result?.ok) throw new Error("Telegram getMe failed")
   const commandResult = await requestJson(`https://api.telegram.org/bot${token}/getMyCommands`)
   const commandNames = new Set((commandResult?.result || []).map((item) => item.command))
-  if (!["home", "sessions", "opencode", "codex", "zcode", "add", "batch"].every((name) => commandNames.has(name))) throw new Error("Telegram command menu is incomplete")
+  if (!["home", "sessions", "opencode", "codex", "zcode", "pi", "add", "batch"].every((name) => commandNames.has(name))) throw new Error("Telegram command menu is incomplete")
   const sessions = await discoverSessions()
   const codexSessions = filterAgentSessions(sessions, "codex").length
   const zcodeSessions = filterAgentSessions(sessions, "zcode").length
@@ -2588,6 +2645,7 @@ function selfTest() {
   if (parseCommand("/opencode").name !== "opencode") throw new Error("parse opencode failed")
   if (parseCommand("/codex").name !== "codex") throw new Error("parse codex failed")
   if (parseCommand("/zcode").name !== "zcode") throw new Error("parse zcode failed")
+  if (parseCommand("/pi").name !== "pi") throw new Error("parse pi failed")
   if (parseCommand("/new hub | 检查项目").arg?.alias !== "hub" || parseCommand("/new hub | 检查项目").arg?.prompt !== "检查项目") throw new Error("parse new failed")
   if (parseCommand("/new bad")?.name !== "new" || parseCommand("/new bad")?.arg !== null) throw new Error("parse invalid new failed")
   if (parseCommand("/sessions").name !== "sessions") throw new Error("parse sessions failed")

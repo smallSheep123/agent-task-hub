@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## 0.6.0 - 2026-09-26
+
+### Added
+
+- Connected live Pi terminal sessions through a Pi extension, with a separate instance identity for every terminal process.
+- Added `/pi` session selection, prompt delivery, sequential queues, stop requests, dashboard status, and completion notifications for both Telegram and terminal-started work.
+- Added a Pi extension installer and isolated live smoke test.
+
+### Verified
+
+- Passed the existing Hub test suite and the Pi bridge lifecycle test.
+- Passed a real Pi 0.87.1 session, prompt, model response, and completion-event test both with an explicit extension path and after auto-discovery from the installed extension directory. The live Telegram gateway processed completions for prompts sent through the bridge and for a Pi-side manual prompt.
+
 ## 0.5.5 - 2026-09-26
 
 ### Fixed

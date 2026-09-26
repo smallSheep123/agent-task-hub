@@ -2,7 +2,7 @@
 
 [English](../README.md) · **简体中文** · [架构说明](ARCHITECTURE.md) · [Codex 命令设计](CODEX_COMMANDS.zh-CN.md) · [开发路线](ROADMAP.md) · [安全说明](../SECURITY.md)
 
-Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控制中心。当前版本已经通过一个机器人支持 OpenCode Desktop、Codex 和 ZCode，并隔离各自的会话、队列、事件与审批。
+Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控制中心。当前版本已经通过一个机器人支持 OpenCode Desktop、Codex、ZCode 和 Pi，并隔离各自的会话、队列、事件与审批。
 
 > 当前状态：OpenCode、Codex 与 ZCode 适配器均已实现。Codex 支持私有 `stdio`，也可以选择只绑定 `127.0.0.1` 的官方共享 App Server；ZCode 使用桌面端自带的 App Server，通过私有 `stdio` 通信。
 
@@ -31,12 +31,16 @@ Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控�
 
 安装程序会把适配器复制到 `%USERPROFILE%\.config\opencode\plugins\agent-task-hub.js`，把运行数据保存到 `%USERPROFILE%\.config\agent-task-hub`，并创建名为 `Agent Task Hub` 的计划任务。这些名称和旧的 OpenCode Telegram Bridge 完全分开，不会共用配置、运行状态或自启任务。
 
+### Pi 终端接入
+
+运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-pi-extension.ps1`，将扩展安装到 `%USERPROFILE%\.pi\agent\extensions\agent-task-hub.js`。新开的 Pi 终端会自动加载；已打开的每个终端需要输入一次 `/reload`。随后在 Telegram 发送 `/pi`，选择一个正在运行的 Pi 终端。可对所选终端使用 `/send`、`/add`、`/batch`、`/queue` 和 `/stop`；电脑端手动执行的任务也会发送完成通知。每个终端进程单独登记，即使打开同一份会话文件也不会混淆。通信只使用本机文件，不监听网络端口，也不复制 Pi 凭证。Pi 的审批仍在终端处理。如果网关重启后无法确认某条 Pi 队列指令是否完成，队列会暂停等待人工核对，避免重复执行。
+
 ## Telegram 命令
 
 | 命令 | 作用 |
 |---|---|
 | `/home` | 打开聚合首页 |
-| `/opencode`、`/codex`、`/zcode` | 进入对应 Agent 的会话列表 |
+| `/opencode`、`/codex`、`/zcode`、`/pi` | 进入对应 Agent 的会话列表 |
 | `/new 项目别名 \| 指令` | 在当前 Codex 或 ZCode 模式中新建会话 |
 | `/sessions` 或 `/sessions 2` | 分页浏览所有已连接 Agent 的会话 |
 | `/find 关键词` | 搜索标题和项目目录 |

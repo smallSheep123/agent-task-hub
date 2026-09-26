@@ -4,9 +4,11 @@
 
 **English** · [简体中文](docs/README.zh-CN.md) · [Architecture](docs/ARCHITECTURE.md) · [Codex commands](docs/CODEX_COMMANDS.md) · [Roadmap](docs/ROADMAP.md) · [Security](SECURITY.md)
 
-Agent Task Hub is a Windows-first, multilingual Telegram control center for local coding agents. The current release supports OpenCode Desktop, Codex, and ZCode through one bot, with isolated sessions, queues, events, and approvals.
+Agent Task Hub is a Windows-first, multilingual Telegram control center for local coding agents. The current release supports OpenCode Desktop, Codex, ZCode, and Pi through one bot, with isolated sessions, queues, events, and approvals.
 
 > Status: OpenCode, Codex, and ZCode adapters are implemented. Codex supports private `stdio` and an optional shared official App Server bound only to `127.0.0.1`; ZCode uses its bundled local App Server over private `stdio`.
+
+Pi uses an extension inside each Pi terminal. Each terminal process is a separate Hub instance, even when two terminals open the same session file.
 
 ## What it does
 
@@ -33,12 +35,16 @@ Requirements: Windows 10/11, Node.js 22+, a Telegram bot from [@BotFather](https
 
 Setup installs the adapter as `%USERPROFILE%\.config\opencode\plugins\agent-task-hub.js`, stores runtime data in `%USERPROFILE%\.config\agent-task-hub`, and creates an `Agent Task Hub` scheduled task. These names are intentionally separate from the earlier OpenCode Telegram Bridge project, so both codebases do not share state or startup entries.
 
+### Pi terminal integration
+
+Install the optional Pi extension with `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-pi-extension.ps1`. It copies one file to `%USERPROFILE%\.pi\agent\extensions\agent-task-hub.js`. New Pi terminals load it automatically; enter `/reload` once in each terminal that was already open. Then use `/pi` in Telegram to select a live terminal session. `/send`, `/add`, `/batch`, `/queue`, and `/stop` work in the selected terminal. Manually started Pi tasks also send completion notifications. The extension communicates through local files under `%USERPROFILE%\.config\agent-task-hub\pi`; it opens no network listener and does not copy Pi credentials. Pi approval prompts remain in the terminal. A Pi queue whose completion cannot be proved after a gateway restart is paused for review instead of replayed.
+
 ## Telegram commands
 
 | Command | Purpose |
 |---|---|
 | `/home` | Open the aggregated agent home |
-| `/opencode`, `/codex`, `/zcode` | Enter an agent-specific session list |
+| `/opencode`, `/codex`, `/zcode`, `/pi` | Enter an agent-specific session list |
 | `/new project_alias \| prompt` | Create a session in the active Codex or ZCode mode |
 | `/sessions` or `/sessions 2` | Browse sessions from all connected agents |
 | `/find keyword` | Search session titles and project paths |
