@@ -71,6 +71,16 @@ try {
 } finally {
   for (const child of children) child.kill()
   await sleep(500)
+  const instanceDir = join(dataRoot, "pi", "instances")
+  if (existsSync(instanceDir)) for (const name of readdirSync(instanceDir)) {
+    const path = join(instanceDir, name)
+    let item
+    try { item = JSON.parse(readFileSync(path, "utf8")) } catch { continue }
+    if (!String(item.directory || "").startsWith(`${testRoot}\\`) || !/^[a-f0-9]{12}$/.test(item.instanceId || "")) continue
+    rmSync(path, { force: true })
+    rmSync(join(dataRoot, "pi", "inbox", item.instanceId), { recursive: true, force: true })
+    rmSync(join(dataRoot, "pi", "replies", item.instanceId), { recursive: true, force: true })
+  }
   const historyDir = join(dataRoot, "pi", "history")
   if (existsSync(historyDir)) for (const name of readdirSync(historyDir)) {
     const path = join(historyDir, name)

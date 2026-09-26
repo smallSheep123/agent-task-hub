@@ -26,10 +26,10 @@ const child = spawn(process.execPath, [pi, "--mode", "rpc", "--session-dir", joi
   cwd: root, env: { ...process.env, AGENT_TASK_HUB_DATA_DIR: dataRoot }, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
 })
 let stderr = ""
+let session
 child.stderr.on("data", (chunk) => { stderr += String(chunk).slice(0, 1000) })
 child.stdout.on("data", () => {})
 try {
-  let session
   for (let i = 0; i < 100; i += 1) {
     session = listPiSessions(dataRoot).find((item) => item.directory === root)
     if (session) break
@@ -60,5 +60,21 @@ try {
 } finally {
   child.kill()
   await sleep(500)
+  if (session?.instanceId && /^[a-f0-9]{12}$/.test(session.instanceId)) {
+    const instancePath = join(dataRoot, "pi", "instances", `${session.instanceId}.json`)
+    const item = existsSync(instancePath) ? JSON.parse(readFileSync(instancePath, "utf8")) : null
+    if (item?.directory === root) {
+      rmSync(instancePath, { force: true })
+      rmSync(join(dataRoot, "pi", "inbox", session.instanceId), { recursive: true, force: true })
+      rmSync(join(dataRoot, "pi", "replies", session.instanceId), { recursive: true, force: true })
+    }
+  }
+  const historyDir = join(dataRoot, "pi", "history")
+  if (existsSync(historyDir)) for (const name of readdirSync(historyDir)) {
+    const path = join(historyDir, name)
+    let item
+    try { item = JSON.parse(readFileSync(path, "utf8")) } catch { continue }
+    if (String(item.sessionFile || "").startsWith(`${root}\\`)) rmSync(path, { force: true })
+  }
   rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 })
 }
