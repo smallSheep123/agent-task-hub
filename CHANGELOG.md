@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## 0.6.1 - 2026-09-26
+
+### Added
+
+- Recorded each persistent Pi session's original directory and exact session file so `/show` can provide a PowerShell resume command after the selected terminal closes.
+- Added a two-process live smoke test covering distinct working directories, isolated prompts and notifications, survival of one terminal after the other exits, and exact-file resume from another directory.
+
+### Verified
+
+- Both live Pi processes were aggregated without mixing their sessions or completion events. `--session <absolute file>` restored the original working directory when launched from a different directory.
+
 ## 0.6.0 - 2026-09-26
 
 ### Added

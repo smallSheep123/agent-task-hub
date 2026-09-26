@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto"
+import { createHash, randomBytes, randomUUID } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, dirname, join } from "node:path"
@@ -10,6 +10,7 @@ const instancePath = join(piRoot, "instances", `${instanceId}.json`)
 const inbox = join(piRoot, "inbox", instanceId)
 const replies = join(piRoot, "replies", instanceId)
 const events = join(root, "events")
+const history = join(piRoot, "history")
 
 function atomicJson(path, value) {
   mkdirSync(dirname(path), { recursive: true })
@@ -35,6 +36,7 @@ export default function piAgentTaskHub(pi) {
 
   const identity = () => ({
     sessionId: context?.sessionManager?.getSessionId?.() || "",
+    sessionFile: context?.sessionManager?.getSessionFile?.() || null,
     title: context?.sessionManager?.getSessionName?.() || `Pi · ${basename(context?.cwd || process.cwd())}`,
     directory: context?.cwd || process.cwd(),
     model: context?.model ? `${context.model.provider}/${context.model.id}` : null,
@@ -45,6 +47,13 @@ export default function piAgentTaskHub(pi) {
     atomicJson(instancePath, { instanceId, processId: process.pid, ...identity(),
       status: busy ? "busy" : "idle", startedAt, updatedAt: new Date().toISOString(),
       latestReply, lastError: latestError, lastFinishedAt, lastRunId })
+  }
+  const rememberSession = () => {
+    if (!context) return
+    const item = identity()
+    if (!item.sessionFile || !item.sessionId) return
+    const key = createHash("sha256").update(item.sessionFile.toLowerCase()).digest("hex").slice(0, 24)
+    atomicJson(join(history, `${key}.json`), { ...item, lastSeenAt: new Date().toISOString() })
   }
   const processInbox = async () => {
     if (!context || !existsSync(inbox)) return
@@ -75,11 +84,12 @@ export default function piAgentTaskHub(pi) {
     mkdirSync(inbox, { recursive: true })
     mkdirSync(replies, { recursive: true })
     heartbeat()
+    rememberSession()
     if (timer) clearInterval(timer)
     timer = setInterval(() => { heartbeat(); void processInbox() }, 750)
     timer.unref?.()
   })
-  pi.on("session_info_changed", async (_event, ctx) => { context = ctx; heartbeat() })
+  pi.on("session_info_changed", async (_event, ctx) => { context = ctx; heartbeat(); rememberSession() })
   pi.on("agent_start", async (_event, ctx) => {
     context = ctx; busy = true; startedAt = new Date().toISOString(); runId = randomUUID()
     latestReply = ""; latestError = null; heartbeat()
@@ -98,6 +108,7 @@ export default function piAgentTaskHub(pi) {
     lastFinishedAt = new Date().toISOString()
     lastRunId = current
     heartbeat()
+    rememberSession()
     const item = { version: 1, backend: "pi", instanceId, id: `pi:${instanceId}:${current}`,
       turnId: current, type: latestError ? "session.error" : "session.idle",
       createdAt: new Date().toISOString(), sessionId: identity().sessionId,
@@ -105,6 +116,7 @@ export default function piAgentTaskHub(pi) {
     atomicJson(join(events, `${Date.now()}-${randomUUID()}.json`), item)
   })
   pi.on("session_shutdown", async () => {
+    rememberSession()
     if (timer) clearInterval(timer)
     timer = null; context = null
     rmSync(instancePath, { force: true })

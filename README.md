@@ -39,6 +39,8 @@ Setup installs the adapter as `%USERPROFILE%\.config\opencode\plugins\agent-task
 
 Install the optional Pi extension with `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-pi-extension.ps1`. It copies one file to `%USERPROFILE%\.pi\agent\extensions\agent-task-hub.js`. New Pi terminals load it automatically; enter `/reload` once in each terminal that was already open. Then use `/pi` in Telegram to select a live terminal session. `/send`, `/add`, `/batch`, `/queue`, and `/stop` work in the selected terminal. Manually started Pi tasks also send completion notifications. The extension communicates through local files under `%USERPROFILE%\.config\agent-task-hub\pi`; it opens no network listener and does not copy Pi credentials. Pi approval prompts remain in the terminal. A Pi queue whose completion cannot be proved after a gateway restart is paused for review instead of replayed.
 
+Pi stores sessions by working directory, so `pi --continue` selects the latest session for the current directory. The extension records each persistent session's original directory and exact session file. `/show` displays a PowerShell resume command for the selected Pi session, including after that terminal closes. The command uses `pi --session <absolute-session-file>` and must be run on the computer. Telegram only controls terminals that are already running; it does not launch or resume Pi processes remotely.
+
 ## Telegram commands
 
 | Command | Purpose |

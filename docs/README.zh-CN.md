@@ -35,6 +35,8 @@ Agent Task Hub 是面向 Windows 本机编码智能体的多语言 Telegram 控�
 
 运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-pi-extension.ps1`，将扩展安装到 `%USERPROFILE%\.pi\agent\extensions\agent-task-hub.js`。新开的 Pi 终端会自动加载；已打开的每个终端需要输入一次 `/reload`。随后在 Telegram 发送 `/pi`，选择一个正在运行的 Pi 终端。可对所选终端使用 `/send`、`/add`、`/batch`、`/queue` 和 `/stop`；电脑端手动执行的任务也会发送完成通知。每个终端进程单独登记，即使打开同一份会话文件也不会混淆。通信只使用本机文件，不监听网络端口，也不复制 Pi 凭证。Pi 的审批仍在终端处理。如果网关重启后无法确认某条 Pi 队列指令是否完成，队列会暂停等待人工核对，避免重复执行。
 
+Pi 的 `--continue` 会按当前工作目录查找最近会话。扩展会记录原工作目录和会话文件的绝对路径；在 Telegram 选择过的 Pi 会话，即使终端退出，仍可发送 `/show` 查看 PowerShell 恢复命令。命令使用 `pi --session <会话文件绝对路径>`，需要在电脑上运行。Telegram 只控制已经运行的 Pi 终端，不会远程新开或恢复进程。
+
 ## Telegram 命令
 
 | 命令 | 作用 |

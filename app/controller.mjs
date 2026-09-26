@@ -12,7 +12,7 @@ import { telegramMarkdownBody } from "./telegram-markdown.mjs"
 import { approvalOptionsForRequest, approvalResponseForRequest, CodexAppServer, terminalEventFromNotification } from "../adapters/codex-app-server.mjs"
 import { chooseOpenCodeQuestionOption, completeOpenCodeQuestion, nextOpenCodeQuestionIndex, normalizeOpenCodeQuestion, openCodeQuestionAnswers, openCodeQuestionToken, submitOpenCodeQuestion } from "../adapters/opencode-question.mjs"
 import { ZCodeAppServer, zcodeTerminalEvent } from "../adapters/zcode-app-server.mjs"
-import { listPiSessions, sendPiCommand } from "../adapters/pi-bridge.mjs"
+import { findPiHistory, listPiSessions, piResumeCommand, sendPiCommand } from "../adapters/pi-bridge.mjs"
 
 const appDir = dirname(fileURLToPath(import.meta.url))
 const dataRoot = process.env.AGENT_TASK_HUB_DATA_DIR || join(homedir(), ".config", "agent-task-hub")
@@ -549,10 +549,18 @@ export function sessionStateIdentity(target) {
 async function getSessionView(session) {
   if (session.backend === "pi") {
     const live = listPiSessions(dataRoot).find((item) => item.id === session.id && item.instanceId === session.instanceId)
-    if (!live) throw new Error("Pi terminal session is offline or has switched sessions")
+    const history = findPiHistory(dataRoot, session.id)
+    if (!live) {
+      if (!history) throw new Error("Pi terminal session is offline and has no saved resume information")
+      const command = piResumeCommand(history)
+      return i18n.language === "zh-CN"
+        ? `Pi · ${history.title}\n状态：终端已关闭\n原目录：${history.directory}\n会话文件：${history.sessionFile}\n\n请在电脑 PowerShell 执行：\n${command}`
+        : `Pi · ${history.title}\nStatus: terminal closed\nOriginal directory: ${history.directory}\nSession file: ${history.sessionFile}\n\nRun in PowerShell on the computer:\n${command}`
+    }
+    const resume = piResumeCommand(live)
     return i18n.language === "zh-CN"
-      ? `Pi · ${live.title}\n状态：${live.status}\n目录：${live.directory}\n模型：${live.model || "未知"}\n思维强度：${live.thinkingLevel || "未知"}\n终端实例：${live.instanceId}\n\n最近回复：\n${live.latestReply || "暂无"}`
-      : `Pi · ${live.title}\nStatus: ${live.status}\nDirectory: ${live.directory}\nModel: ${live.model || "unknown"}\nThinking: ${live.thinkingLevel || "unknown"}\nTerminal instance: ${live.instanceId}\n\nLatest reply:\n${live.latestReply || "none"}`
+      ? `Pi · ${live.title}\n状态：${live.status}\n目录：${live.directory}\n模型：${live.model || "未知"}\n思维强度：${live.thinkingLevel || "未知"}\n终端实例：${live.instanceId}\n\n最近回复：\n${live.latestReply || "暂无"}${resume ? `\n\n日后恢复命令：\n${resume}` : ""}`
+      : `Pi · ${live.title}\nStatus: ${live.status}\nDirectory: ${live.directory}\nModel: ${live.model || "unknown"}\nThinking: ${live.thinkingLevel || "unknown"}\nTerminal instance: ${live.instanceId}\n\nLatest reply:\n${live.latestReply || "none"}${resume ? `\n\nResume later:\n${resume}` : ""}`
   }
   if ((session.backend || "opencode") === "codex") {
     const client = await ensureCodexClient()
