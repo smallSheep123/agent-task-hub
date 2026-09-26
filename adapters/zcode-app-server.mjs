@@ -165,6 +165,32 @@ export function zcodeIndexCompletion(previous, current, monitorStartedAt) {
     && (previous.status !== current.status || previous.updatedAt < current.updatedAt)
 }
 
+export function zcodeLocalReply(dataRoot, sessionId, finishedAt, { maxAgeMs = 15 * 60_000 } = {}) {
+  const path = join(dirname(dataRoot), "cli", "db", "db.sqlite")
+  const end = timestamp(finishedAt)
+  if (!sessionId || !end || !existsSync(path)) return ""
+  let db
+  try {
+    db = new DatabaseSync(path, { readOnly: true })
+    const messages = db.prepare("SELECT id, data FROM message WHERE session_id = ? AND time_created BETWEEN ? AND ? ORDER BY time_created DESC LIMIT 100")
+      .all(String(sessionId), end - maxAgeMs, end)
+    for (const message of messages) {
+      let info
+      try { info = JSON.parse(message.data) } catch { continue }
+      if (info?.role === "user") return ""
+      if (info?.role !== "assistant" || (info.finish && info.finish !== "stop")) continue
+      const parts = db.prepare("SELECT data FROM part WHERE message_id = ? ORDER BY sequence").all(message.id)
+      const reply = parts.map((part) => {
+        try { const value = JSON.parse(part.data); return value?.type === "text" ? String(value.text || "") : "" }
+        catch { return "" }
+      }).filter(Boolean).join("\n").trim()
+      if (reply) return reply.slice(0, 1800)
+    }
+  } catch { return "" }
+  finally { db?.close() }
+  return ""
+}
+
 export function zcodeTerminalEvent(event, session = null) {
   const failed = event?.type === "turn.failed"
   const cancelled = event?.type === "turn.completed" && event?.payload?.resultType === "cancelled"
@@ -649,7 +675,8 @@ export class ZCodeAppServer extends EventEmitter {
         status: failed ? "failed" : cancelled ? "interrupted" : "completed",
         createdAt: new Date(current.updatedAt).toISOString(), sessionId: id,
         title: String(row.title || "ZCode session"), directory: String(row.workspace_path || ""),
-        excerpt: "", error: failed ? "ZCode task failed" : null,
+        excerpt: failed || cancelled ? "" : zcodeLocalReply(this.dataRoot, id, current.updatedAt),
+        error: failed ? "ZCode task failed" : null,
       })
     }
   }

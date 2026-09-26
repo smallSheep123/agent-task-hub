@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## 0.7.1 - 2026-09-26
+
+### Fixed
+
+- Included the final assistant reply in ZCode Desktop completion notifications by matching the local session message to the task index completion time; empty-response App Server events use the same read-only fallback.
+- Rejected replies from another session, after a new user turn, or outside a bounded completion window.
+
 ## 0.7.0 - 2026-09-26
 
 ### Added

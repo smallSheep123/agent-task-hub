@@ -11,7 +11,7 @@ import { SessionDiscoveryCache } from "./session-discovery-cache.mjs"
 import { telegramMarkdownBody } from "./telegram-markdown.mjs"
 import { approvalOptionsForRequest, approvalResponseForRequest, CodexAppServer, terminalEventFromNotification } from "../adapters/codex-app-server.mjs"
 import { chooseOpenCodeQuestionOption, completeOpenCodeQuestion, nextOpenCodeQuestionIndex, normalizeOpenCodeQuestion, openCodeQuestionAnswers, openCodeQuestionToken, submitOpenCodeQuestion } from "../adapters/opencode-question.mjs"
-import { ZCodeAppServer, zcodeTerminalEvent } from "../adapters/zcode-app-server.mjs"
+import { ZCodeAppServer, zcodeLocalReply, zcodeTerminalEvent } from "../adapters/zcode-app-server.mjs"
 import { findPiHistory, listPiSessions, piResumeCommand, sendPiCommand } from "../adapters/pi-bridge.mjs"
 import { listPiCatalog, piSessionTitle } from "../adapters/pi-catalog.mjs"
 
@@ -2599,7 +2599,11 @@ async function main(options = {}) {
         if (!event) { rmSync(path, { force: true }); continue }
         if (event.nextAttemptAt && Date.parse(event.nextAttemptAt) > Date.now()) continue
         if (event.backend === "opencode" && event.type === "session.idle" && Date.now() - Date.parse(event.createdAt || 0) < 2500) continue
+        if (event.backend === "zcode" && event.type === "session.idle" && !event.excerpt && Date.now() - Date.parse(event.createdAt || 0) < 1500) continue
         if (Date.now() - Date.parse(event.createdAt || 0) > 7 * 86400000) { rmSync(path, { force: true }); continue }
+        if (event.backend === "zcode" && event.type === "session.idle" && !event.excerpt) {
+          event.excerpt = zcodeLocalReply(zcodeClient?.dataRoot || join(homedir(), ".zcode", "v2"), event.sessionId, event.createdAt)
+        }
         const eventKey = event.sessionId ? migrateSessionState(event) : null
         const activeQueueItem = eventKey ? state.queueInFlight[eventKey] : null
         const matchesQueue = Boolean(activeQueueItem && Date.parse(event.createdAt || 0) >= Date.parse(activeQueueItem.dispatchedAt || 0))
