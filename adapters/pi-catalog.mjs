@@ -22,6 +22,23 @@ export function piSessionTitle(session) {
   return session?.sessionName || session?.firstPrompt || basename(session?.directory || "") || session?.title || "Pi session"
 }
 
+export async function latestPiReply(sessionFile) {
+  if (!sessionFile || !existsSync(sessionFile)) return null
+  const input = createReadStream(sessionFile, { encoding: "utf8" })
+  const lines = createInterface({ input, crlfDelay: Infinity })
+  let latest = null
+  try {
+    for await (const line of lines) {
+      let entry
+      try { entry = JSON.parse(line) } catch { continue }
+      if (entry?.type !== "message" || entry.message?.role !== "assistant") continue
+      const text = (entry.message.content || []).filter((part) => part?.type === "text").map((part) => part.text || "").join("\n")
+      if (text.trim()) latest = { text, timestamp: entry.timestamp || null }
+    }
+  } finally { lines.close(); input.destroy() }
+  return latest
+}
+
 async function readSessionFile(path, stats) {
   const key = keyFor(path)
   const cached = fileCache.get(key)

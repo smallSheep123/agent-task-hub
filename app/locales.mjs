@@ -1,5 +1,6 @@
 const catalogs = {
   "zh-CN": {
+    sendPrompt: "✉️ 发送指令", sendHelp: "已选择“{0}”。\n\n发送指令：/send 指令内容\n排队执行：/add 指令内容。",
     batchEmpty: "批量指令不能为空", batchLimit: "一次最多提交 {0} 条指令", itemLimit: "每条指令最多 3500 个字符", truncated: "…（已截断）",
     once: "仅允许这次", always: "本会话持续允许", reject: "拒绝", unknown: "未知", unknownSession: "未知会话",
     approvalTitle: "🔐 OpenCode 请求审批", session: "会话：{0}", permission: "权限：{0}", targets: "目标：\n{0}", details: "详情：\n{0}", directory: "目录：{0}", approvalPrompt: "请选择处理方式。任务会在你决定后继续。",
@@ -20,6 +21,7 @@ const catalogs = {
     help: "Agent Task Hub\n\n/home — 聚合首页\n/sessions — 全部 Agent 会话\n/opencode — OpenCode 入口\n/codex — Codex 入口\n/zcode — ZCode 入口\n/new 项目别名 | 指令 — 在当前 Codex/ZCode 模式新建会话\n/current — 当前模式和会话\n/show — 查看当前进展与最近回复\n/send 内容 — 发送为独立可见轮次；Codex 忙碌时自动等待\n/steer 内容 — 立即补充当前 Codex 轮次，不产生独立气泡\n/add 内容 — 追加一条队列指令\n/batch — 按单独一行的 --- 提交多条指令\n/queue — 查看当前会话队列\n\n选择会话后会自动进入对应 Agent 模式。高级命令继续可用，但不占用主菜单。"
   },
   "en-US": {
+    sendPrompt: "✉️ Send prompt", sendHelp: "Selected “{0}”.\n\nSend a prompt: /send prompt\nQueue it: /add prompt.",
     batchEmpty: "Batch input cannot be empty", batchLimit: "A batch can contain at most {0} prompts", itemLimit: "Each prompt can contain at most 3,500 characters", truncated: "… (truncated)",
     once: "Allow once", always: "Allow for session", reject: "Reject", unknown: "Unknown", unknownSession: "Unknown session",
     approvalTitle: "🔐 OpenCode approval required", session: "Session: {0}", permission: "Permission: {0}", targets: "Targets:\n{0}", details: "Details:\n{0}", directory: "Directory: {0}", approvalPrompt: "Choose how to proceed. The task will continue after your decision.",

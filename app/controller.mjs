@@ -9,11 +9,12 @@ import { decodeSessionAction, encodeSessionAction, enterAgentMode, enterGlobalMo
 import { codexTaskStartedAt, codexThreadAppearsActive, elapsedDurationParts, isRunningStatus, openCodeTaskStartedAt, timestampMilliseconds } from "./dashboard.mjs"
 import { SessionDiscoveryCache } from "./session-discovery-cache.mjs"
 import { telegramMarkdownBody } from "./telegram-markdown.mjs"
+import { telegramTextParts } from "./telegram-long-text.mjs"
 import { approvalOptionsForRequest, approvalResponseForRequest, CodexAppServer, terminalEventFromNotification } from "../adapters/codex-app-server.mjs"
 import { chooseOpenCodeQuestionOption, completeOpenCodeQuestion, nextOpenCodeQuestionIndex, normalizeOpenCodeQuestion, openCodeQuestionAnswers, openCodeQuestionToken, submitOpenCodeQuestion } from "../adapters/opencode-question.mjs"
 import { ZCodeAppServer, zcodeLocalReply, zcodeTerminalEvent } from "../adapters/zcode-app-server.mjs"
 import { findPiHistory, listPiSessions, piResumeCommand, sendPiCommand } from "../adapters/pi-bridge.mjs"
-import { listPiCatalog, piSessionTitle } from "../adapters/pi-catalog.mjs"
+import { latestPiReply, listPiCatalog, piSessionTitle } from "../adapters/pi-catalog.mjs"
 
 const appDir = dirname(fileURLToPath(import.meta.url))
 const dataRoot = process.env.AGENT_TASK_HUB_DATA_DIR || join(homedir(), ".config", "agent-task-hub")
@@ -240,6 +241,7 @@ export function parseCommand(text) {
   if ((match = value.match(/^\/use(?:@[A-Za-z0-9_]+)?\s+([A-Za-z0-9_-]{1,80})$/i))) return { name: "use", arg: match[1] }
   if (/^\/current(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "current" }
   if (/^\/show(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "show" }
+  if (/^\/send(?:@[A-Za-z0-9_]+)?$/i.test(value)) return { name: "send", arg: "" }
   if ((match = value.match(/^\/send(?:@[A-Za-z0-9_]+)?\s+([\s\S]{1,3500})$/i))) return { name: "send", arg: match[1].trim() }
   if ((match = value.match(/^\/steer(?:@[A-Za-z0-9_]+)?\s+([\s\S]{1,3500})$/i))) return { name: "steer", arg: match[1].trim() }
   if ((match = value.match(/^\/add(?:@[A-Za-z0-9_]+)?\s+([\s\S]{1,3500})$/i))) return { name: "add", arg: match[1].trim() }
@@ -562,9 +564,11 @@ async function getSessionView(session) {
         : `Pi · ${piSessionTitle(history)}\nStatus: closed\nFirst prompt: ${history.firstPrompt || "none"}\nLast activity: ${new Date(history.updatedAt || Date.now()).toLocaleString("en-US")}\nOriginal directory: ${history.directory}\nSession file: ${history.sessionFile}\n\nResume on the computer:\n${command}`
     }
     const resume = piResumeCommand(live)
+    const savedReply = await latestPiReply(live.sessionFile).catch(() => null)
+    const reply = savedReply?.text?.length > String(live.latestReply || "").length ? savedReply.text : live.latestReply
     return i18n.language === "zh-CN"
-      ? `Pi · ${piSessionTitle({ ...live, ...session })}\n状态：${live.status}\n目录：${live.directory}\n模型：${live.model || "未知"}\n思维强度：${live.thinkingLevel || "未知"}\n终端实例：${live.instanceId}\n\n最近回复：\n${live.latestReply || "暂无"}${resume ? `\n\n日后恢复命令：\n${resume}` : ""}`
-      : `Pi · ${piSessionTitle({ ...live, ...session })}\nStatus: ${live.status}\nDirectory: ${live.directory}\nModel: ${live.model || "unknown"}\nThinking: ${live.thinkingLevel || "unknown"}\nTerminal instance: ${live.instanceId}\n\nLatest reply:\n${live.latestReply || "none"}${resume ? `\n\nResume later:\n${resume}` : ""}`
+      ? `Pi · ${piSessionTitle({ ...live, ...session })}\n状态：${live.status}\n目录：${live.directory}\n模型：${live.model || "未知"}\n思维强度：${live.thinkingLevel || "未知"}\n终端实例：${live.instanceId}\n\n最近回复：\n${reply || "暂无"}${resume ? `\n\n日后恢复命令：\n${resume}` : ""}`
+      : `Pi · ${piSessionTitle({ ...live, ...session })}\nStatus: ${live.status}\nDirectory: ${live.directory}\nModel: ${live.model || "unknown"}\nThinking: ${live.thinkingLevel || "unknown"}\nTerminal instance: ${live.instanceId}\n\nLatest reply:\n${reply || "none"}${resume ? `\n\nResume later:\n${resume}` : ""}`
   }
   if ((session.backend || "opencode") === "codex") {
     const client = await ensureCodexClient()
@@ -648,6 +652,22 @@ async function main(options = {}) {
       chat_id: String(config.allowedChatId),
       ...telegramMarkdownBody(compact(text, 3900), { link_preview_options: { is_disabled: true }, ...extra }),
     })
+  }
+
+  async function sendLongText(text, extra = {}, { startIndex = 0, afterPart = null } = {}) {
+    const parts = telegramTextParts(text, { language: i18n.language })
+    let result
+    for (let index = startIndex; index < parts.length; index += 1) {
+      const part = parts[index]
+      result = await telegram("sendMessage", {
+        chat_id: String(config.allowedChatId),
+        link_preview_options: { is_disabled: true },
+        ...(part.formatted ? telegramMarkdownBody(part.text) : { text: part.text }),
+        ...(index === parts.length - 1 ? extra : {}),
+      })
+      if (afterPart) await afterPart(index + 1)
+    }
+    return result
   }
 
   function noteForegroundActivity() {
@@ -1759,8 +1779,12 @@ async function main(options = {}) {
       [{ text: i18n.language === "zh-CN" ? "▶️ 后台恢复" : "▶️ Resume in background", callback_data: encodeSessionAction("pirestore", selected) }],
       [{ text: t("buttonAllSessions"), callback_data: "allsessions" }, { text: t("buttonHome"), callback_data: "home" }],
     ] } })
-    const rows = [[{ text: t("viewDetails"), callback_data: encodeSessionAction("show", selected) }, { text: t("append"), callback_data: encodeSessionAction("addhelp", selected) }],
-      [{ text: t("viewQueue"), callback_data: encodeSessionAction("queue", selected) }, { text: t("stopTask"), callback_data: encodeSessionAction("stopask", selected) }]]
+    const rows = selected.backend === "pi"
+      ? [[{ text: t("viewDetails"), callback_data: encodeSessionAction("show", selected) }, { text: t("sendPrompt"), callback_data: encodeSessionAction("sendhelp", selected) }],
+        [{ text: t("append"), callback_data: encodeSessionAction("addhelp", selected) }, { text: t("viewQueue"), callback_data: encodeSessionAction("queue", selected) }],
+        [{ text: t("stopTask"), callback_data: encodeSessionAction("stopask", selected) }]]
+      : [[{ text: t("viewDetails"), callback_data: encodeSessionAction("show", selected) }, { text: t("append"), callback_data: encodeSessionAction("addhelp", selected) }],
+        [{ text: t("viewQueue"), callback_data: encodeSessionAction("queue", selected) }, { text: t("stopTask"), callback_data: encodeSessionAction("stopask", selected) }]]
     rows.push([{ text: t("buttonAllSessions"), callback_data: "allsessions" }, { text: t("buttonHome"), callback_data: "home" }])
     await send(t("selected", backendText(selected.backend), sessionListTitle(selected), selected.id, selected.directory), { reply_markup: { inline_keyboard: rows } })
   }
@@ -1987,8 +2011,9 @@ async function main(options = {}) {
     }
     const selected = await resolveSelected()
     if (!selected) return send(t("selectFirst"))
-    if (command.name === "show") return send(await getSessionView(selected))
+    if (command.name === "show") return selected.backend === "pi" ? sendLongText(await getSessionView(selected)) : send(await getSessionView(selected))
     if (command.name === "queue") return send(queueSummary(selected))
+    if (command.name === "send" && !command.arg) return send(t("sendHelp", selected.title))
     if (selected.backend === "pi" && ["send", "add", "batch", "resume", "stop"].includes(command.name)
       && !listPiSessions(dataRoot).some((item) => item.id === selected.id && item.instanceId === selected.instanceId)) {
       return send(i18n.language === "zh-CN" ? "该 Pi 会话已关闭。请在会话详情中点击「后台恢复」，恢复后再发送指令。" : "This Pi session is closed. Open its details and tap Resume in background before sending prompts.")
@@ -2290,7 +2315,8 @@ async function main(options = {}) {
         const target = decodeSessionAction(data, "show")
         const session = await resolveActionSession(target)
         if (!session) throw new Error(t("sessionUnavailable"))
-        await send(await getSessionView(session))
+        if (session.backend === "pi") await sendLongText(await getSessionView(session))
+        else await send(await getSessionView(session))
       } else if (data.startsWith("pirestore:")) {
         await telegram("answerCallbackQuery", { callback_query_id: query.id })
         callbackAnswered = true
@@ -2302,6 +2328,15 @@ async function main(options = {}) {
           ? result.alreadyRunning ? "该 Pi 会话已经在运行，已切换到现有进程。" : "Pi 会话已在后台恢复，可以继续发送指令。"
           : result.alreadyRunning ? "This Pi session is already running; switched to its existing process." : "Pi session resumed in the background. You can send prompts now.")
         await selectSession(result.session)
+      } else if (data.startsWith("sendhelp:")) {
+        await telegram("answerCallbackQuery", { callback_query_id: query.id })
+        callbackAnswered = true
+        const target = decodeSessionAction(data, "sendhelp")
+        const session = await resolveActionSession(target)
+        if (!session) throw new Error(t("sessionUnavailable"))
+        selectAgentSession(state, { id: session.id, backend: session.backend || "opencode", instanceId: session.instanceId || null, title: session.title, directory: session.directory, status: session.status || "idle" })
+        saveState()
+        await send(t("sendHelp", session.title))
       } else if (data.startsWith("addhelp:")) {
         await telegram("answerCallbackQuery", { callback_query_id: query.id })
         callbackAnswered = true
@@ -2401,11 +2436,12 @@ async function main(options = {}) {
     if (!event.sessionId) return {}
     const backend = event.backend || "opencode"
     const current = state.selected?.id === event.sessionId && (state.selected?.backend || "opencode") === backend
-    return { reply_markup: { inline_keyboard: [
-      [{ text: current ? t("currentSession") : t("enterSession"), callback_data: encodeSessionAction("select", event) }, { text: t("viewDetails"), callback_data: encodeSessionAction("show", event) }],
-      [{ text: t("append"), callback_data: encodeSessionAction("addhelp", event) }, { text: t("viewQueue"), callback_data: encodeSessionAction("queue", event) }],
-      [{ text: t("stopTask"), callback_data: encodeSessionAction("stopask", event) }, { text: t("buttonHome"), callback_data: "home" }],
-    ] } }
+    const rows = [[{ text: current ? t("currentSession") : t("enterSession"), callback_data: encodeSessionAction("select", event) }, { text: t("viewDetails"), callback_data: encodeSessionAction("show", event) }]]
+    if (backend === "pi") rows.push([{ text: t("sendPrompt"), callback_data: encodeSessionAction("sendhelp", event) }, { text: t("append"), callback_data: encodeSessionAction("addhelp", event) }])
+    else rows.push([{ text: t("append"), callback_data: encodeSessionAction("addhelp", event) }, { text: t("viewQueue"), callback_data: encodeSessionAction("queue", event) }])
+    rows.push([{ text: backend === "pi" ? t("viewQueue") : t("stopTask"), callback_data: encodeSessionAction(backend === "pi" ? "queue" : "stopask", event) }, { text: backend === "pi" ? t("stopTask") : t("buttonHome"), callback_data: backend === "pi" ? encodeSessionAction("stopask", event) : "home" }])
+    if (backend === "pi") rows.push([{ text: t("buttonHome"), callback_data: "home" }])
+    return { reply_markup: { inline_keyboard: rows } }
   }
 
   function pendingCompletionExists(session, dispatchedAt) {
@@ -2627,10 +2663,26 @@ async function main(options = {}) {
         }
         const icon = isInterrupted ? "⏹" : isError ? "❌" : "✅"
         const stats = event.summary ? t("changeStats", event.summary.files || 0, event.summary.additions || 0, event.summary.deletions || 0) : ""
+        if (event.backend === "pi" && !isError && event.instanceId) {
+          const live = listPiSessions(dataRoot).find((item) => item.id === event.sessionId && item.instanceId === event.instanceId && item.lastRunId === event.turnId)
+          if (live?.sessionFile) {
+            const savedReply = await latestPiReply(live.sessionFile).catch(() => null)
+            if (savedReply?.text?.length > String(event.excerpt || "").length
+              && (!savedReply.timestamp || Date.parse(savedReply.timestamp) <= Date.parse(event.createdAt || 0) + 2000)) {
+              event.excerpt = savedReply.text
+              atomicJson(path, event)
+            }
+          }
+        }
         const detail = isError ? t("error", event.error || t("unknownError")) : event.excerpt ? t("latestReply", event.excerpt) : ""
-        const text = compact(t("completionAgent", icon, backendText(event.backend || "opencode"), isInterrupted ? t("taskInterrupted") : isError ? t("executionFailed") : t("taskCompleted"), event.title, event.directory, stats, queueNote, detail))
+        const text = t("completionAgent", icon, backendText(event.backend || "opencode"), isInterrupted ? t("taskInterrupted") : isError ? t("executionFailed") : t("taskCompleted"), event.title, event.directory, stats, queueNote, detail)
         try {
-          await send(text, completionButtons(event))
+          if (event.backend === "pi") {
+            await sendLongText(text, completionButtons(event), {
+              startIndex: Number(event.deliveryPart || 0),
+              afterPart: (index) => { event.deliveryPart = index; atomicJson(path, event) },
+            })
+          } else await send(compact(text), completionButtons(event))
           if (matchesQueue) {
             delete state.queueInFlight[eventKey]
             if (unsuccessful) {

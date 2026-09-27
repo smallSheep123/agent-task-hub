@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { telegramTextParts } from "../app/telegram-long-text.mjs"
 import { escapeMarkdownV2, markdownCode, markdownCodeLanguage, markdownRichInline, telegramMarkdown, telegramMarkdownBody } from "../app/telegram-markdown.mjs"
 
 assert.equal(escapeMarkdownV2("a_b [c](d).js + 1!"), "a\\_b \\[c\\]\\(d\\)\\.js \\+ 1\\!")
@@ -98,5 +99,12 @@ assert.ok(sessionTitleWithColon.includes("📝「/D:\\\\AIGC/proxy/NEW\\_NODE\\.
 const bounded = telegramMarkdown("Title\n" + "_[x]. ".repeat(2000))
 assert.ok(bounded.length <= 4000)
 assert.equal(telegramMarkdownBody("Title").parse_mode, "MarkdownV2")
+
+const fullReply = `✅ [Pi] 任务已完成\n最近回复：\n${"完整内容和代码 `x`。\n".repeat(500)}`.trim()
+const longParts = telegramTextParts(fullReply, { language: "zh-CN" })
+assert.ok(longParts.length > 1)
+assert.ok(longParts.every((part) => !part.formatted && part.text.length < 4096))
+assert.equal(longParts.map((part) => part.text.slice(part.text.indexOf("\n") + 1)).join(""), fullReply)
+assert.deepEqual(telegramTextParts("short"), [{ text: "short", formatted: true }])
 
 console.log("TELEGRAM_MARKDOWN_TEST=PASS")

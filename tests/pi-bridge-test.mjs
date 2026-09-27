@@ -1,9 +1,9 @@
 import assert from "node:assert/strict"
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { findPiHistory, listPiSessions, piResumeCommand, sendPiCommand } from "../adapters/pi-bridge.mjs"
-import { listPiCatalog, piSessionTitle } from "../adapters/pi-catalog.mjs"
+import { latestPiReply, listPiCatalog, piSessionTitle } from "../adapters/pi-catalog.mjs"
 import { decodeSessionAction, encodeSessionAction } from "../app/agent-context.mjs"
 
 const root = mkdtempSync(join(tmpdir(), "agent-hub-pi-"))
@@ -32,17 +32,21 @@ try {
   assert.equal(piSessionTitle(liveCatalog), "Named work")
   assert.match(piResumeCommand(session), /--session/)
   assert.deepEqual(decodeSessionAction(encodeSessionAction("select", session), "select"), { backend: "pi", instanceId: session.instanceId, id: sessionId })
+  assert.ok(Buffer.byteLength(encodeSessionAction("sendhelp", session), "utf8") <= 64)
   assert.equal((await sendPiCommand(root, session, "send", "hello")).ok, true)
   assert.deepEqual(sent, ["hello"])
   await handlers.get("agent_start")({}, context)
   assert.equal(listPiSessions(root)[0].status, "busy")
-  await handlers.get("message_end")({ message: { role: "assistant", content: [{ type: "text", text: "done" }] } }, context)
+  const fullReply = `done\n${"中文完整回复。".repeat(400)}`
+  appendFileSync(sessionFile, `${JSON.stringify({ type: "message", timestamp: new Date().toISOString(), message: { role: "assistant", content: [{ type: "text", text: fullReply }] } })}\n`)
+  await handlers.get("message_end")({ message: { role: "assistant", content: [{ type: "text", text: fullReply }] } }, context)
   await handlers.get("agent_settled")({}, context)
   assert.equal(listPiSessions(root)[0].status, "idle")
   const eventFile = readdirSync(join(root, "events"))[0]
   const event = JSON.parse(readFileSync(join(root, "events", eventFile), "utf8"))
   assert.equal(event.backend, "pi")
-  assert.equal(event.excerpt, "done")
+  assert.equal(event.excerpt, fullReply)
+  assert.equal((await latestPiReply(sessionFile)).text, fullReply)
   assert.equal(event.instanceId, session.instanceId)
   assert.equal((await sendPiCommand(root, session, "abort")).ok, true)
   assert.equal(sent.at(-1), "abort")

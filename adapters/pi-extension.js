@@ -20,7 +20,7 @@ function atomicJson(path, value) {
 }
 
 function assistantText(message) {
-  return (message?.content || []).filter((part) => part?.type === "text").map((part) => part.text || "").join("\n").slice(0, 1800)
+  return (message?.content || []).filter((part) => part?.type === "text").map((part) => part.text || "").join("\n")
 }
 
 export default function piAgentTaskHub(pi) {

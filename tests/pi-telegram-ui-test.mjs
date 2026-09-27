@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { setTimeout as sleep } from "node:timers/promises"
+import { telegramTextParts } from "../app/telegram-long-text.mjs"
 
 const root = mkdtempSync(join(tmpdir(), "hub-pi-ui-"))
 const agentDir = join(root, "pi-agent")
@@ -83,6 +84,22 @@ try {
   const detail = await waitFor(() => sent.find((item) => String(item.text).includes("已关闭") && item.reply_markup?.inline_keyboard?.flat().some((button) => String(button.callback_data || "").startsWith("pirestore:p:"))), "closed Pi details")
   assert.match(String(detail.text), /首条提问/)
   assert.ok(Buffer.byteLength(detail.reply_markup.inline_keyboard[0][0].callback_data) <= 64)
+  updates.push({ update_id: nextUpdate++, message: { message_id: 3, date: Math.floor(Date.now() / 1000), chat: { id: 900001, type: "private" }, from: user, text: "/send" } })
+  await waitFor(() => sent.find((item) => String(item.text).includes("/send 指令内容")), "Pi send usage")
+
+  const fullReply = `决定性的证据。\n${"逐页检查，不要跳过中间页。\n".repeat(450)}`
+  const completion = `✅ [Pi] 任务已完成\nBrowser project\n目录：${projectDir}\n来源：电脑端手动任务\n\n最近回复：\n${fullReply}`
+  const expectedParts = telegramTextParts(completion, { language: "zh-CN" })
+  assert.ok(expectedParts.length > 1)
+  writeFileSync(join(root, "events", "pi-long-reply.json"), JSON.stringify({
+    version: 1, backend: "pi", instanceId: "123456789abc", id: "pi:123456789abc:test-turn",
+    turnId: "test-turn", type: "session.idle", createdAt: new Date().toISOString(),
+    sessionId: saved[0].id, title: "Browser project", directory: projectDir, excerpt: fullReply,
+  }))
+  await waitFor(() => sent.filter((item) => String(item.text).startsWith("第 ")).length === expectedParts.length, "full Pi completion")
+  const delivered = sent.filter((item) => String(item.text).startsWith("第 "))
+  assert.equal(delivered.map((item) => String(item.text).slice(String(item.text).indexOf("\n") + 1)).join(""), completion.trim())
+  assert.ok(delivered.at(-1).reply_markup?.inline_keyboard?.flat().some((button) => String(button.callback_data || "").startsWith("sendhelp:p:")))
   console.log("PI_TELEGRAM_UI_TEST=PASS")
 } finally {
   controller?.kill()
