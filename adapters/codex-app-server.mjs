@@ -256,6 +256,7 @@ export class CodexAppServer extends EventEmitter {
     this.threadNames = new Map()
     this.internalThreadIds = new Set()
     this.loadedThreads = new Set()
+    this.resumingThreads = new Map()
     this.activeTurns = new Map()
     this.latestMessages = new Map()
     this.diffs = new Map()
@@ -684,16 +685,28 @@ export class CodexAppServer extends EventEmitter {
   }
 
   async resumeThread(threadId) {
-    const response = await this.request("thread/resume", { threadId: String(threadId) })
-    const thread = this.#rememberThread(response?.thread)
-    this.#syncActiveTurn(thread)
-    if (thread?.id) this.loadedThreads.add(String(thread.id))
-    return thread
+    const id = String(threadId)
+    if (this.resumingThreads.has(id)) return this.resumingThreads.get(id)
+    const pending = (async () => {
+      // Large Desktop histories can take longer than the general 20s RPC budget.
+      const response = await this.request("thread/resume", { threadId: id }, Math.max(this.requestTimeoutMs, 60000))
+      const thread = this.#rememberThread(response?.thread)
+      this.#syncActiveTurn(thread)
+      if (thread?.id) this.loadedThreads.add(String(thread.id))
+      return thread
+    })()
+    this.resumingThreads.set(id, pending)
+    try { return await pending } finally { this.resumingThreads.delete(id) }
   }
 
   async sendPrompt(threadId, text) {
     const id = String(threadId)
     if (this.activeTurns.has(id)) throw activeTurnError(id)
+    if (!this.loadedThreads.has(id) && String(this.transport).startsWith("shared")) {
+      // Detect Desktop's active turn before attempting an expensive resume.
+      await this.readThread(id)
+      if (this.activeTurns.has(id)) throw activeTurnError(id)
+    }
     if (!this.loadedThreads.has(id)) await this.resumeThread(id)
     if (this.activeTurns.has(id)) throw activeTurnError(id)
     const response = await this.request("turn/start", {

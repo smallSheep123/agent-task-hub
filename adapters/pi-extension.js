@@ -12,11 +12,22 @@ const replies = join(piRoot, "replies", instanceId)
 const events = join(root, "events")
 const history = join(piRoot, "history")
 
-function atomicJson(path, value) {
+const retryableRenameCodes = new Set(["EPERM", "EACCES", "EBUSY"])
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+
+export function atomicJson(path, value, { renameFile = renameSync, wait = pause } = {}) {
   mkdirSync(dirname(path), { recursive: true })
   const temp = `${path}.${randomUUID()}.tmp`
-  writeFileSync(temp, JSON.stringify(value), { encoding: "utf8", mode: 0o600 })
-  renameSync(temp, path)
+  try {
+    writeFileSync(temp, JSON.stringify(value), { encoding: "utf8", mode: 0o600 })
+    for (let attempt = 0; ; attempt += 1) {
+      try { renameFile(temp, path); return }
+      catch (error) {
+        if (!retryableRenameCodes.has(error?.code) || attempt >= 7) throw error
+        wait(Math.min(15 * (attempt + 1), 60))
+      }
+    }
+  } finally { try { rmSync(temp, { force: true }) } catch {} }
 }
 
 function assistantText(message) {
@@ -33,6 +44,16 @@ export default function piAgentTaskHub(pi) {
   let runId = null
   let lastFinishedAt = null
   let lastRunId = null
+  let lastWarningAt = 0
+  let lastHeartbeatAt = 0
+  const pendingEvents = []
+
+  const reportError = (error) => {
+    if (Date.now() - lastWarningAt < 60000) return
+    lastWarningAt = Date.now()
+    console.error(`[Agent Task Hub] Pi bridge I/O failed (${error?.code || "unknown"}); Pi will keep running.`)
+  }
+  const safe = (action) => { try { return action() } catch (error) { reportError(error); return false } }
 
   const identity = () => ({
     sessionId: context?.sessionManager?.getSessionId?.() || "",
@@ -44,6 +65,7 @@ export default function piAgentTaskHub(pi) {
   })
   const heartbeat = () => {
     if (!context) return
+    lastHeartbeatAt = Date.now()
     atomicJson(instancePath, { instanceId, processId: process.pid, workerId: process.env.AGENT_TASK_HUB_WORKER_ID || null, ...identity(),
       status: busy ? "busy" : "idle", startedAt, updatedAt: new Date().toISOString(),
       latestReply, lastError: latestError, lastFinishedAt, lastRunId })
@@ -78,21 +100,33 @@ export default function piAgentTaskHub(pi) {
     }
   }
 
+  const flushEvents = () => {
+    while (pendingEvents.length) {
+      const item = pendingEvents[0]
+      atomicJson(item.path, item.value)
+      pendingEvents.shift()
+    }
+  }
+
   pi.on("session_start", async (_event, ctx) => {
     context = ctx
     busy = false; startedAt = null; runId = null; latestReply = ""; latestError = null
-    mkdirSync(inbox, { recursive: true })
-    mkdirSync(replies, { recursive: true })
-    heartbeat()
-    rememberSession()
+    safe(() => mkdirSync(inbox, { recursive: true }))
+    safe(() => mkdirSync(replies, { recursive: true }))
+    safe(heartbeat)
+    safe(rememberSession)
     if (timer) clearInterval(timer)
-    timer = setInterval(() => { heartbeat(); void processInbox() }, 750)
+    timer = setInterval(() => {
+      if (Date.now() - lastHeartbeatAt >= 3000) safe(heartbeat)
+      safe(flushEvents)
+      void processInbox().catch(reportError)
+    }, 750)
     timer.unref?.()
   })
-  pi.on("session_info_changed", async (_event, ctx) => { context = ctx; heartbeat(); rememberSession() })
+  pi.on("session_info_changed", async (_event, ctx) => { context = ctx; safe(heartbeat); safe(rememberSession) })
   pi.on("agent_start", async (_event, ctx) => {
     context = ctx; busy = true; startedAt = new Date().toISOString(); runId = randomUUID()
-    latestReply = ""; latestError = null; heartbeat()
+    latestReply = ""; latestError = null; safe(heartbeat)
   })
   pi.on("message_end", async (event) => {
     if (event.message?.role !== "assistant") return
@@ -107,18 +141,20 @@ export default function piAgentTaskHub(pi) {
     busy = false
     lastFinishedAt = new Date().toISOString()
     lastRunId = current
-    heartbeat()
-    rememberSession()
+    safe(heartbeat)
+    safe(rememberSession)
     const item = { version: 1, backend: "pi", instanceId, id: `pi:${instanceId}:${current}`,
       turnId: current, type: latestError ? "session.error" : "session.idle",
       createdAt: new Date().toISOString(), sessionId: identity().sessionId,
       title: identity().title, directory: identity().directory, excerpt: latestReply, error: latestError }
-    atomicJson(join(events, `${Date.now()}-${randomUUID()}.json`), item)
+    pendingEvents.push({ path: join(events, `${Date.now()}-${randomUUID()}.json`), value: item })
+    safe(flushEvents)
   })
   pi.on("session_shutdown", async () => {
-    rememberSession()
+    safe(rememberSession)
+    safe(flushEvents)
     if (timer) clearInterval(timer)
     timer = null; context = null
-    rmSync(instancePath, { force: true })
+    safe(() => rmSync(instancePath, { force: true }))
   })
 }

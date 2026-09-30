@@ -57,6 +57,80 @@ function modelText(value) {
   return [providerId, modelId].filter(Boolean).join("/")
 }
 
+export function zcodeModelSelection(value) {
+  if (!value) return null
+  if (typeof value === "object") return { ...value, modelId: value.modelId || value.modelID, providerId: value.providerId || value.providerID }
+  const text = String(value)
+  const slash = text.lastIndexOf("/")
+  return slash < 0 ? { modelId: text } : { providerId: text.slice(0, slash), modelId: text.slice(slash + 1) }
+}
+
+export function zcodeLocalModel(dataRoot, sessionId) {
+  const path = join(dirname(dataRoot), "cli", "db", "db.sqlite")
+  if (!existsSync(path)) return {}
+  let db
+  try {
+    db = new DatabaseSync(path, { readOnly: true })
+    for (const row of db.prepare("SELECT data, time_created FROM message WHERE session_id = ? ORDER BY time_created DESC LIMIT 50").all(String(sessionId))) {
+      let info
+      try { info = JSON.parse(row.data) } catch { continue }
+      if (info.role !== "user" || info.synthetic) continue
+      const model = zcodeModelSelection(info.modelSelection || info.model)
+      if (model?.modelId) return { model, thoughtLevel: info.thoughtLevel || info.model?.variant || model.options?.reasoningLevel || null, startedAt: timestamp(row.time_created) }
+    }
+  } catch { return {} }
+  finally { db?.close() }
+  return {}
+}
+
+export function zcodeLocalActivity(dataRoot, sessionId, { now = Date.now(), includeReply = false } = {}) {
+  const path = join(dirname(dataRoot), "cli", "db", "db.sqlite")
+  if (!existsSync(path)) return {}
+  let db
+  try {
+    db = new DatabaseSync(path, { readOnly: true })
+    const rows = db.prepare("SELECT id, data, time_created FROM message WHERE session_id = ? ORDER BY time_created DESC LIMIT 30").all(String(sessionId))
+    let activity = {}
+    for (const row of rows) {
+      let info
+      try { info = JSON.parse(row.data) } catch { continue }
+      if (info.role !== "assistant") continue
+      if (!activity.updatedAt) {
+        const updatedAt = timestamp(info.time?.completed || row.time_created)
+        const status = info.error ? "error" : info.finish === "stop" ? "completed"
+          : now - updatedAt < 10 * 60_000 ? "running" : null
+        activity = { updatedAt, status }
+      }
+      if (!includeReply) return activity
+      const text = db.prepare("SELECT data FROM part WHERE message_id = ? ORDER BY sequence").all(row.id).map((part) => {
+        try { const value = JSON.parse(part.data); return value.type === "text" ? String(value.text || "") : "" } catch { return "" }
+      }).filter(Boolean).join("\n").trim()
+      if (text) return { ...activity, latestReply: text }
+    }
+    return activity
+  } catch { return {} }
+  finally { db?.close() }
+}
+
+export function zcodeDesktopSessions(dataRoot, limit = 200) {
+  const path = join(dataRoot, "tasks-index.sqlite")
+  if (!existsSync(path)) return []
+  const db = new DatabaseSync(path, { readOnly: true })
+  try {
+    return db.prepare("SELECT * FROM tasks WHERE deleted = 0 AND archived = 0 ORDER BY updated_at DESC LIMIT ?").all(limit).map((row) => {
+      let meta = {}
+      try { meta = JSON.parse(row.meta_json || "{}") } catch {}
+      return {
+        ...meta, sessionId: row.task_id, title: row.title,
+        workspace: { workspacePath: row.workspace_path, workspaceKey: row.workspace_key || row.workspace_path },
+        status: row.task_status, model: zcodeModelSelection(row.model || meta.model),
+        thoughtLevel: meta.thoughtLevel || null,
+        createdAt: row.created_at, updatedAt: row.updated_at,
+      }
+    })
+  } finally { db.close() }
+}
+
 export function zcodeTaskIndexRecord(session, overrides = {}) {
   const taskId = String(session?.sessionId || session?.id || "")
   const workspace = workspacePath(session?.workspace) || String(session?.directory || "")
@@ -145,6 +219,7 @@ export function zcodeSessionToHubSession(session) {
     status: statusText(session?.status),
     zcodeStatus: String(session?.status || "idle"),
     model: session?.model || null,
+    thoughtLevel: session?.thoughtLevel || session?.model?.options?.reasoningLevel || null,
     updatedAt: timestamp(session?.updatedAt || session?.createdAt),
     createdAt: timestamp(session?.createdAt),
     activeTurnId: session?.activeTurnId || null,
@@ -192,7 +267,7 @@ export function zcodeLocalReply(dataRoot, sessionId, finishedAt, { maxAgeMs = 15
 }
 
 export function zcodeTerminalEvent(event, session = null) {
-  const failed = event?.type === "turn.failed"
+  const failed = event?.type === "turn.failed" || ["error", "failed", "failure"].includes(event?.payload?.resultType)
   const cancelled = event?.type === "turn.completed" && event?.payload?.resultType === "cancelled"
   return {
     version: 1,
@@ -207,7 +282,7 @@ export function zcodeTerminalEvent(event, session = null) {
     title: titleForSession(session),
     directory: workspacePath(session?.workspace),
     excerpt: String(event?.payload?.response || "").trim().slice(0, 1800),
-    error: failed ? String(event?.payload?.error?.message || "ZCode turn failed").slice(0, 1000) : null,
+    error: failed ? String(event?.payload?.error?.message || event?.payload?.response || "ZCode turn failed").slice(0, 1000) : null,
     durationMs: Number(event?.payload?.duration || 0) || null,
   }
 }
@@ -328,13 +403,16 @@ export function zcodeAccountOverlay(bundle, dataRoot = join(homedir(), ".zcode",
   const primaryProviderId = preferredProviders.find((providerId) => accounts.has(providerId)) || [...accounts.keys()][0]
   const primaryRegion = primaryProviderId.includes(":zai-") ? "zai" : "bigmodel"
   const offpeakProviderId = `account:${primaryRegion}-offpeak-idle-plan`
+  const cachedEntries = readJson(join(dataRoot, "coding-plan-cache.json"))?.entryStatus?.items || {}
 
   // ZCode Desktop sends a complete snapshot for every built-in account provider.
   // Omitting unavailable entries makes updateAccountConfig acknowledge the update,
   // but leaves the provider/model registry without the entitled provider.
   for (const rule of accountRules) {
     const providerId = rule.providerId
+    const legacyId = providerId.replace(/^account:/, "builtin:").replace("-individual-coding-plan", "-coding-plan")
     const entitled = providerId === primaryProviderId || providerId === offpeakProviderId
+      || (accounts.has(providerId) && cachedEntries[legacyId]?.status === "available")
     providers[providerId] = { access: { type: "zhipu-account", entitled } }
     const sameRegion = providerId.includes(`:${primaryRegion}-`)
     const isTeam = providerId.includes("-team-")
@@ -505,10 +583,28 @@ export class ZCodeAppServer extends EventEmitter {
   async listSessions({ limit = 200 } = {}) {
     const result = await this.request("session/list", { limit, includeArchived: false }, 60000)
     const list = Array.isArray(result?.sessions) ? result.sessions : []
-    for (const item of list) this.sessions.set(String(item.sessionId || item.id), item)
-    return list.filter((item) => ["interactive", "fork"].includes(item?.sessionKind)).map((item) => {
+    const merged = new Map(list.filter((item) => !item?.sessionKind || ["interactive", "fork"].includes(item.sessionKind)).map((item) => [String(item.sessionId || item.id), item]))
+    for (const desktop of zcodeDesktopSessions(this.dataRoot, limit)) {
+      const id = String(desktop.sessionId)
+      const item = merged.get(id)
+      // A separate app-server cannot observe Desktop's active runtime.
+      merged.set(id, { ...item, ...desktop, model: desktop.model || item?.model, thoughtLevel: desktop.thoughtLevel || item?.thoughtLevel })
+    }
+    for (const [id, item] of merged) this.sessions.set(id, item)
+    return [...merged.values()].map((item) => {
+      const activity = zcodeLocalActivity(this.dataRoot, item.sessionId || item.id)
+      if (activity.status && activity.updatedAt > timestamp(item.updatedAt)) {
+        item.status = activity.status
+        item.updatedAt = activity.updatedAt
+      }
+      if (!item.model || !item.thoughtLevel || statusText(item.status) === "busy") {
+        const local = zcodeLocalModel(this.dataRoot, item.sessionId || item.id)
+        if (!item.model) item.model = local.model || null
+        if (!item.thoughtLevel || local.model) item.thoughtLevel = local.thoughtLevel || item.thoughtLevel
+        item.activeStartedAt = local.startedAt || item.activeStartedAt
+      }
       const session = zcodeSessionToHubSession(item)
-      session.activeStartedAt = this.activeStartedAt.get(session.id) || 0
+      session.activeStartedAt = this.activeStartedAt.get(session.id) || (session.status === "busy" ? timestamp(item.activeStartedAt) : 0)
       session.dashboardStartedAt = session.activeStartedAt
       return session
     })
@@ -524,10 +620,20 @@ export class ZCodeAppServer extends EventEmitter {
       await this.resume(this.sessions.get(id) || id)
       result = await this.request("session/read", { sessionId: id, messageLimit })
     }
-    const info = result?.session || result?.snapshot?.session || this.sessions.get(String(sessionId)) || { sessionId }
-    this.sessions.set(String(sessionId), info)
-    this.#syncTaskIndex(info)
-    return result
+    const raw = result?.session || result?.snapshot?.session || { sessionId }
+    const desktop = zcodeDesktopSessions(this.dataRoot).find((item) => String(item.sessionId) === id)
+    const cached = { ...this.sessions.get(id), ...desktop }
+    const settings = result?.settings || result?.snapshot?.settings || {}
+    const local = zcodeLocalModel(this.dataRoot, id)
+    const activity = zcodeLocalActivity(this.dataRoot, id, { includeReply: true })
+    const info = { ...cached, ...raw,
+      status: activity.status && activity.updatedAt > timestamp(desktop?.updatedAt) ? activity.status : desktop?.status || raw.status,
+      model: zcodeModelSelection(raw.model || settings.model?.current || settings.model?.lastUsed || local.model || cached.model),
+      thoughtLevel: raw.thoughtLevel || settings.thoughtLevel?.current || local.thoughtLevel || cached.thoughtLevel,
+    }
+    this.sessions.set(id, info)
+    // Reading a session must not overwrite Desktop's model, mode or running status.
+    return { ...result, session: info, latestReply: activity.latestReply || "" }
   }
 
   async status(sessionId) {
@@ -540,6 +646,18 @@ export class ZCodeAppServer extends EventEmitter {
     const sessionId = String(cached?.sessionId || cached?.id || session)
     const workspace = cached?.workspace || (cached?.directory ? workspaceRef(cached.directory) : undefined)
     const result = await this.request("session/resume", { sessionId, ...(workspace ? { workspace } : {}) }, 60000)
+    // Desktop's model selection is not restored into a separate app-server runtime.
+    // A readable historical model is not proof that this runtime can send a turn.
+    const snapshot = await this.request("session/read", { sessionId, messageLimit: 1 })
+    const settings = snapshot?.settings || snapshot?.snapshot?.settings || {}
+    if (!settings.model?.current) {
+      const local = zcodeLocalModel(this.dataRoot, sessionId)
+      const model = zcodeModelSelection(local.model || cached?.model)
+      if (!model?.modelId || !model?.providerId) throw new Error("ZCode resumed without a model selection; select a model in Desktop before retrying")
+      await this.request("session/setModel", { sessionId, model })
+      const thoughtLevel = local.thoughtLevel || cached?.thoughtLevel || model.options?.reasoningLevel
+      if (thoughtLevel) await this.request("session/setThoughtLevel", { sessionId, thoughtLevel })
+    }
     this.residentSessions.add(sessionId)
     return result
   }
@@ -555,6 +673,7 @@ export class ZCodeAppServer extends EventEmitter {
     await this.#subscribe(id)
     this.#syncTaskIndex(this.sessions.get(id) || { sessionId: id }, { status: "running", updatedAt: Date.now() })
     const result = await this.request("session/send", { sessionId: id, content: String(content), inputId: randomUUID(), queryId: randomUUID() }, 60000)
+    if (result?.accepted !== true) throw new Error("ZCode did not accept the prompt")
     return { id: null, accepted: result?.accepted === true }
   }
 
@@ -594,7 +713,16 @@ export class ZCodeAppServer extends EventEmitter {
   }
 
   #syncTaskIndex(session, overrides = {}) {
-    try { return upsertZCodeTaskIndex(this.dataRoot, session, overrides) }
+    try {
+      const id = String(session?.sessionId || session?.id || "")
+      const desktop = zcodeDesktopSessions(this.dataRoot).find((item) => String(item.sessionId) === id)
+      const local = zcodeLocalModel(this.dataRoot, id)
+      return upsertZCodeTaskIndex(this.dataRoot, {
+        ...desktop, ...session,
+        model: session?.model || local.model || desktop?.model,
+        thoughtLevel: session?.thoughtLevel || local.thoughtLevel || desktop?.thoughtLevel,
+      }, overrides)
+    }
     catch (error) {
       this.emit("diagnostic", `ZCode Desktop task index sync failed: ${error.message}`)
       return false
@@ -616,8 +744,9 @@ export class ZCodeAppServer extends EventEmitter {
     }
     if (event.type === "turn.completed" || event.type === "turn.failed") {
       this.activeStartedAt.delete(sessionId)
-      this.#syncTaskIndex(this.sessions.get(sessionId) || { sessionId }, { status: event.type === "turn.failed" ? "error" : "completed", updatedAt: event.timestamp })
-      this.emit("terminal", zcodeTerminalEvent(event, this.sessions.get(sessionId)))
+      const terminal = zcodeTerminalEvent(event, this.sessions.get(sessionId))
+      this.#syncTaskIndex(this.sessions.get(sessionId) || { sessionId }, { status: terminal.type === "session.error" ? "error" : terminal.type === "session.interrupted" ? "cancelled" : "completed", updatedAt: event.timestamp })
+      this.emit("terminal", terminal)
     }
   }
 

@@ -588,9 +588,9 @@ async function getSessionView(session) {
       const role = item?.role || item?.info?.role || item?.message?.role
       return role === "assistant" || item?.type === "assistant"
     })
-    const latestText = latest?.content || latest?.text || latest?.message?.content
+    const latestText = snapshot.latestReply || latest?.content || latest?.text || latest?.message?.content
       || (latest?.parts || []).filter((part) => part?.type === "text").map((part) => part.text || "").join("\n")
-    return compact(t("zcodeSessionView", info?.title || session.title, info?.status || session.status, workspacePathForZCode(info?.workspace) || session.directory, info?.model?.modelId || t("none"), latestText || t("noAssistantReply")))
+    return compact(t("zcodeSessionView", info?.title || session.title, info?.status || session.status, workspacePathForZCode(info?.workspace) || session.directory, info?.model?.modelId || t("none"), info?.thoughtLevel || t("none"), latestText || t("noAssistantReply")))
   }
   const id = encodeURIComponent(session.id)
   const [info, messages, todos, statuses] = await Promise.all([
@@ -638,11 +638,25 @@ async function main(options = {}) {
   let telegramFailureCount = 0
 
   async function telegram(method, body = {}) {
-    const response = await requestJson(`${apiBase}/${method}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    }, method === "getUpdates" ? 40000 : 15000)
+    let response
+    try {
+      response = await requestJson(`${apiBase}/${method}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }, method === "getUpdates" ? 40000 : method === "sendMessage" ? 30000 : 15000)
+    } catch (error) {
+      if (error?.name !== "AbortError") {
+        if (error?.message === "fetch failed") {
+          throw new Error(i18n.language === "zh-CN" ? `Telegram ${method} 网络连接失败，请稍后重试。` : `Telegram ${method} network connection failed; try again shortly.`, { cause: error })
+        }
+        throw error
+      }
+      const message = method === "sendMessage"
+        ? i18n.language === "zh-CN" ? "Telegram 消息发送超时，是否送达尚不确定。请先检查聊天记录。" : "Telegram message timed out; delivery is uncertain. Check the chat first."
+        : i18n.language === "zh-CN" ? `Telegram ${method} 请求超时，请稍后重试。` : `Telegram ${method} timed out; try again shortly.`
+      throw new Error(message, { cause: error })
+    }
     if (!response?.ok) throw new Error(`Telegram ${method} failed`)
     return response.result
   }
@@ -652,6 +666,15 @@ async function main(options = {}) {
       chat_id: String(config.allowedChatId),
       ...telegramMarkdownBody(compact(text, 3900), { link_preview_options: { is_disabled: true }, ...extra }),
     })
+  }
+
+  async function sendAccepted(text, operation, session) {
+    try { return await send(text) }
+    catch (error) {
+      const cause = error?.cause?.cause || error?.cause || error
+      log("WARN", `Telegram acknowledgement delivery uncertain operation=${operation} backend=${session?.backend || "opencode"} session=${session?.id || "none"}: ${error?.message || error}; cause=${cause?.code || cause?.message || "unknown"}`)
+      return null
+    }
   }
 
   async function sendLongText(text, extra = {}, { startIndex = 0, afterPart = null } = {}) {
@@ -1812,7 +1835,9 @@ async function main(options = {}) {
         const when = new Date(item.updatedAt || 0).toLocaleString(i18n.language, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })
         return `${numberBadges[index] || `${index + 1}.`} ${selectedMark}${piListStatus(item)} Pi · ${shortLine(sessionListTitle(item), 60)} · ${when}\n📁 ${item.directory}`
       }
-      return `${numberBadges[index] || `${index + 1}.`} ${selectedMark}${backendText(item.backend)} · ${item.status}\n📝「${item.title}」\n📁 ${item.directory}`
+      const modelLine = item.backend === "zcode"
+        ? `\n🧠 ${item.model?.modelId || t("unknown")} · ${item.thoughtLevel || t("unknown")}` : ""
+      return `${numberBadges[index] || `${index + 1}.`} ${selectedMark}${backendText(item.backend)} · ${item.status}\n📝「${item.title}」\n📁 ${item.directory}${modelLine}`
     })
     const keyboard = sessions.map((item, index) => [{
       text: `${state.selected?.id === item.id && (state.selected?.backend || "opencode") === (item.backend || "opencode") && (item.backend !== "pi" || state.selected?.instanceId === item.instanceId) ? "✅ " : ""}${index + 1}. ${backendText(item.backend)} · ${sessionListTitle(item)}`.slice(0, 52),
@@ -2039,16 +2064,17 @@ async function main(options = {}) {
       saveState()
       const status = await currentSessionStatus(selected)
       if (status === "idle" && !state.queuePaused[key] && !state.queueInFlight[key]) {
+        let started
         try {
-          const started = await dispatchNext(selected)
-          if (started) return send(t("addStarted", compact(started.item.text, 500), started.remaining))
+          started = await dispatchNext(selected)
         } catch (error) {
           return send(t("savedStartFailed", compact(error.message, 300)))
         }
+        if (started) return sendAccepted(t("addStarted", compact(started.item.text, 500), started.remaining), "add", selected)
       }
       state.queueStartOnIdle[key] = status !== "idle"
       saveState()
-      return send(t("added", status, queue.length))
+      return sendAccepted(t("added", status, queue.length), "add", selected)
     }
     if (command.name === "batch") {
       const key = migrateSessionState(selected)
@@ -2062,16 +2088,17 @@ async function main(options = {}) {
       saveState()
       const status = await currentSessionStatus(selected)
       if (status === "idle" && !state.queuePaused[key] && !state.queueInFlight[key]) {
+        let started
         try {
-          const started = await dispatchNext(selected)
-          if (started) return send(t("batchStarted", parts.length, compact(started.item.text, 500), started.remaining))
+          started = await dispatchNext(selected)
         } catch (error) {
           return send(t("batchSavedFailed", parts.length, compact(error.message, 300)))
         }
+        if (started) return sendAccepted(t("batchStarted", parts.length, compact(started.item.text, 500), started.remaining), "batch", selected)
       }
       state.queueStartOnIdle[key] = status !== "idle"
       saveState()
-      return send(t("batchAdded", parts.length, status, queue.length))
+      return sendAccepted(t("batchAdded", parts.length, status, queue.length), "batch", selected)
     }
     if (command.name === "remove") {
       const queue = waitingQueue(selected)
@@ -2141,7 +2168,7 @@ async function main(options = {}) {
           queue.push(item)
           state.queueStartOnIdle[migrateSessionState(selected)] = true
           saveState()
-          return send(t("added", "busy", queue.length))
+          return sendAccepted(t("added", "busy", queue.length), "send", selected)
         }
         await sendPiCommand(dataRoot, selected, "send", command.arg)
         selected.status = "busy"
@@ -2154,7 +2181,7 @@ async function main(options = {}) {
           body: JSON.stringify({ parts: [{ type: "text", text: command.arg }] }),
         })
       }
-      return send(t("sentAgent", backendText(selected.backend)))
+      return sendAccepted(t("sentAgent", backendText(selected.backend)), "send", selected)
     }
     if (command.name === "stop") {
       return send(t("confirmStop", selected.title), { reply_markup: { inline_keyboard: [[{ text: t("confirmStopButton"), callback_data: encodeSessionAction("abort", selected) }, { text: t("cancel"), callback_data: "cancel" }]] } })
@@ -2392,6 +2419,7 @@ async function main(options = {}) {
         await send(t("queueClearedDetail"))
       }
     } catch (error) {
+      log("WARN", `callback ${data.split(":", 1)[0] || "unknown"} failed: ${error?.message || error}`)
       if (callbackAnswered) await send(t("operationFailed", compact(error.message, 500))).catch(() => {})
       else await telegram("answerCallbackQuery", { callback_query_id: query.id, text: compact(error.message, 120), show_alert: true }).catch(() => {})
     }

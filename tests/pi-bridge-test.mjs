@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { appendFileSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { findPiHistory, listPiSessions, piResumeCommand, sendPiCommand } from "../adapters/pi-bridge.mjs"
@@ -19,7 +19,26 @@ const context = {
   abort: () => { sent.push("abort") },
 }
 try {
-  const extension = (await import("../adapters/pi-extension.js")).default
+  const { atomicJson, default: extension } = await import("../adapters/pi-extension.js")
+  const atomicPath = join(root, "retry.json")
+  let attempts = 0
+  atomicJson(atomicPath, { saved: true }, {
+    renameFile: (source, destination) => {
+      attempts += 1
+      if (attempts < 3) throw Object.assign(new Error("Windows file busy"), { code: "EPERM" })
+      renameSync(source, destination)
+    },
+    wait: () => {},
+  })
+  assert.equal(attempts, 3)
+  assert.deepEqual(JSON.parse(readFileSync(atomicPath, "utf8")), { saved: true })
+  assert.equal(readdirSync(root).filter((name) => name.endsWith(".tmp")).length, 0)
+  assert.throws(() => atomicJson(atomicPath, { saved: false }, {
+    renameFile: () => { throw Object.assign(new Error("Windows file busy"), { code: "EPERM" }) },
+    wait: () => {},
+  }), { code: "EPERM" })
+  assert.deepEqual(JSON.parse(readFileSync(atomicPath, "utf8")), { saved: true })
+  assert.equal(readdirSync(root).filter((name) => name.endsWith(".tmp")).length, 0)
   extension({ on: (name, handler) => { handlers.set(name, handler) }, sendUserMessage: async (value) => { sent.push(value) } })
   await handlers.get("session_start")({}, context)
   const [session] = listPiSessions(root)

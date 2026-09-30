@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
-import { resolveZCodeBundle, upsertZCodeTaskIndex, zcodeIndexCompletion, zcodeSessionNeedsEventPoll, zcodeSessionToHubSession, zcodeTaskIndexRecord, zcodeTerminalEvent } from "../adapters/zcode-app-server.mjs"
+import { ZCodeAppServer, resolveZCodeBundle, upsertZCodeTaskIndex, zcodeIndexCompletion, zcodeSessionNeedsEventPoll, zcodeSessionToHubSession, zcodeTaskIndexRecord, zcodeTerminalEvent } from "../adapters/zcode-app-server.mjs"
 
 const session = zcodeSessionToHubSession({
   sessionId: "sess_1",
@@ -36,6 +36,25 @@ assert.equal(cancelled.type, "session.interrupted")
 const failed = zcodeTerminalEvent({ eventId: "event_3", sessionId: "sess_1", type: "turn.failed", payload: { error: { message: "boom" } } })
 assert.equal(failed.type, "session.error")
 assert.equal(failed.error, "boom")
+
+const resultFailure = zcodeTerminalEvent({ type: "turn.completed", payload: { resultType: "error", response: "No model selected" } })
+assert.equal(resultFailure.type, "session.error")
+assert.equal(resultFailure.error, "No model selected")
+const resumedClient = new ZCodeAppServer({ dataRoot: "nonexistent-test-root" })
+resumedClient.sessions.set("resume_model", { sessionId: "resume_model", model: { providerId: "account:test", modelId: "GLM-5.3-Flash" }, thoughtLevel: "max" })
+const restoreCalls = []
+resumedClient.request = async (method, params) => {
+  restoreCalls.push({ method, params })
+  return method === "session/read" ? { settings: { model: {}, thoughtLevel: {} } } : {}
+}
+await resumedClient.resume("resume_model")
+assert.deepEqual(restoreCalls.map(x => x.method), ["session/resume", "session/read", "session/setModel", "session/setThoughtLevel"])
+assert.equal(restoreCalls[2].params.model.modelId, "GLM-5.3-Flash")
+assert.equal(restoreCalls[3].params.thoughtLevel, "max")
+resumedClient.request = async () => ({ accepted: false })
+// Avoid subscribing or touching the filesystem for this rejection test.
+resumedClient.subscriptions.add("resume_model")
+await assert.rejects(resumedClient.sendPrompt("resume_model", "test"), /did not accept/)
 
 const idlePollTarget = { status: "idle", updatedAt: 1700000010000 }
 assert.equal(zcodeSessionNeedsEventPoll(idlePollTarget, { baseline: true, previousVersion: 1700000010000 }), true)

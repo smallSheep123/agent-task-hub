@@ -33,6 +33,10 @@ writeFileSync(join(root, "state.json"), JSON.stringify({ updateOffset: 0, select
 
 const updates = []
 const sent = []
+const piPrompts = []
+let failAcknowledgement = ""
+let failedAcknowledgements = 0
+let piHandlers = null
 let nextUpdate = 1000
 let controller
 let output = ""
@@ -42,6 +46,12 @@ const server = createServer((request, response) => {
   request.on("end", () => {
     const method = String(request.url || "").split("/").at(-1)
     const body = raw ? JSON.parse(raw) : {}
+    if (method === "sendMessage" && failAcknowledgement && String(body.text).includes(failAcknowledgement)) {
+      failAcknowledgement = ""
+      failedAcknowledgements += 1
+      request.socket.destroy()
+      return
+    }
     const result = method === "getMe" ? { id: 1, username: "pi_test_bot" }
       : method === "getUpdates" ? updates.splice(0, 1)
         : method === "sendMessage" ? (sent.push(body), { message_id: sent.length, text: body.text }) : true
@@ -100,8 +110,41 @@ try {
   const delivered = sent.filter((item) => String(item.text).startsWith("第 "))
   assert.equal(delivered.map((item) => String(item.text).slice(String(item.text).indexOf("\n") + 1)).join(""), completion.trim())
   assert.ok(delivered.at(-1).reply_markup?.inline_keyboard?.flat().some((button) => String(button.callback_data || "").startsWith("sendhelp:p:")))
+
+  process.env.AGENT_TASK_HUB_DATA_DIR = root
+  const { default: piExtension } = await import("../adapters/pi-extension.js")
+  piHandlers = new Map()
+  piExtension({ on: (name, handler) => piHandlers.set(name, handler), sendUserMessage: async (value) => { piPrompts.push(value) } })
+  const liveFile = join(sessionsDir, `${saved[0].id}.jsonl`)
+  await piHandlers.get("session_start")({}, {
+    cwd: projectDir, model: { provider: "test", id: "model" }, thinkingLevel: "low",
+    sessionManager: { getSessionId: () => saved[0].id, getSessionFile: () => liveFile, getSessionName: () => saved[0].name },
+    abort: () => {},
+  })
+  const { listPiSessions } = await import("../adapters/pi-bridge.mjs")
+  const [live] = listPiSessions(root)
+  await sleep(8500)
+  updates.push({ update_id: nextUpdate++, message: { message_id: 4, date: Math.floor(Date.now() / 1000), chat: { id: 900001, type: "private" }, from: user, text: "/pi" } })
+  const liveList = await waitFor(() => sent.find((item) => item.reply_markup?.inline_keyboard?.flat().some((button) => String(button.callback_data || "").includes(live.instanceId))), "live Pi list")
+  const liveSelect = liveList.reply_markup.inline_keyboard.flat().find((button) => String(button.callback_data || "").startsWith(`select:p:${live.instanceId}.`))
+  assert.ok(liveSelect)
+  updates.push({ update_id: nextUpdate++, callback_query: { id: "pick-live", from: user, data: liveSelect.callback_data,
+    message: { message_id: 5, chat: { id: 900001, type: "private" } } } })
+  await waitFor(() => sent.find((item) => String(item.text).includes("已进入 Pi 模式")), "live Pi selection")
+  failAcknowledgement = "已追加并开始执行"
+  updates.push({ update_id: nextUpdate++, message: { message_id: 6, date: Math.floor(Date.now() / 1000), chat: { id: 900001, type: "private" }, from: user, text: "/add First queued task" } })
+  await waitFor(() => piPrompts.length === 1 && failedAcknowledgements === 1, "Pi add dispatched despite failed acknowledgement")
+  assert.deepEqual(piPrompts, ["First queued task"])
+  failAcknowledgement = "已追加 1 条指令"
+  updates.push({ update_id: nextUpdate++, message: { message_id: 7, date: Math.floor(Date.now() / 1000), chat: { id: 900001, type: "private" }, from: user, text: "/send Second queued task" } })
+  await waitFor(() => failedAcknowledgements === 2, "Pi send queued despite failed acknowledgement")
+  updates.push({ update_id: nextUpdate++, message: { message_id: 8, date: Math.floor(Date.now() / 1000), chat: { id: 900001, type: "private" }, from: user, text: "/queue" } })
+  const queueState = await waitFor(() => sent.find((item) => String(item.text).includes("First queued task") && String(item.text).includes("Second queued task")), "Pi queue after acknowledgement failures")
+  assert.ok(queueState)
+  assert.equal(sent.some((item) => String(item.text).includes("操作失败")), false)
   console.log("PI_TELEGRAM_UI_TEST=PASS")
 } finally {
+  await piHandlers?.get("session_shutdown")?.()
   controller?.kill()
   server.closeAllConnections()
   await new Promise((done) => server.close(done))

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import {
+  CodexAppServer,
   approvalOptionsForRequest,
   approvalResponseForRequest,
   codexMonitorBackoffMs,
@@ -84,4 +85,32 @@ assert.deepEqual(
   { decision: "accept" },
 )
 
+const recoveryClient = new CodexAppServer({ requestTimeoutMs: 20000 })
+let finishResume
+const resumeCalls = []
+recoveryClient.request = (method, params, budget) => {
+  resumeCalls.push({ method, params, budget })
+  return new Promise((resolve) => { finishResume = resolve })
+}
+const firstResume = recoveryClient.resumeThread("large_history")
+const secondResume = recoveryClient.resumeThread("large_history")
+assert.equal(resumeCalls.length, 1, "concurrent callers must share one resume request")
+assert.equal(resumeCalls[0].budget, 60000)
+finishResume({ thread: { id: "large_history", turns: [] } })
+await Promise.all([firstResume, secondResume])
+assert.equal(recoveryClient.loadedThreads.has("large_history"), true)
+assert.equal(recoveryClient.resumingThreads.size, 0)
+recoveryClient.request = async () => { throw new Error("resume timed out") }
+await assert.rejects(recoveryClient.sendPrompt("not_loaded", "do not retry"), /resume timed out/)
+assert.equal(recoveryClient.resumingThreads.size, 0)
+assert.equal(recoveryClient.loadedThreads.has("not_loaded"), false)
+const desktopClient = new CodexAppServer()
+desktopClient.transport = "shared-websocket"
+const desktopMethods = []
+desktopClient.request = async (method) => {
+  desktopMethods.push(method)
+  return { thread: { id: "desktop_busy", turns: [{ id: "active_turn", status: "inProgress" }] } }
+}
+await assert.rejects(desktopClient.sendPrompt("desktop_busy", "queue this"), (error) => error.code === "CODEX_TURN_ACTIVE")
+assert.deepEqual(desktopMethods, ["thread/read"], "Desktop busy detection must not resume or send another turn")
 console.log("CODEX_ADAPTER_TEST=PASS")
