@@ -82,6 +82,7 @@ const record = zcodeTaskIndexRecord({
 assert.equal(record.workspaceKey, "C:\\work")
 assert.equal(record.model, "account:test/GLM-5.3")
 assert.equal(record.status, "running")
+assert.equal(zcodeTaskIndexRecord({ sessionId: "cancelled", status: "cancelled" }).status, "cancelled")
 
 const dataRoot = mkdtempSync(join(tmpdir(), "agent-task-hub-zcode-index-"))
 try {
@@ -114,6 +115,68 @@ try {
   assert.equal(indexed.task_status, "completed")
   assert.equal(indexed.updated_at, 1700000020000)
   assert.equal(JSON.parse(indexed.meta_json).model, "account:test/GLM-5.3")
+
+  const sender = new ZCodeAppServer({ dataRoot })
+  sender.sessions.set("sess_indexed", {
+    sessionId: "sess_indexed", title: "Telegram task", workspace: { workspacePath: "C:\\work" },
+    model: { providerId: "account:test", modelId: "GLM-5.3" },
+  })
+  sender.residentSessions.add("sess_indexed")
+  sender.subscriptions.add("sess_indexed")
+  const storedState = () => {
+    const db = new DatabaseSync(join(dataRoot, "tasks-index.sqlite"), { readOnly: true })
+    try { return db.prepare("SELECT task_status, updated_at FROM tasks WHERE task_id = ?").get("sess_indexed") }
+    finally { db.close() }
+  }
+  const beforeRejected = storedState()
+  sender.request = async () => ({ accepted: false })
+  await assert.rejects(sender.sendPrompt("sess_indexed", "rejected"), /did not accept/)
+  assert.deepEqual(storedState(), beforeRejected, "a rejected prompt must not leave a false running task in Desktop")
+  let sentParams
+  sender.request = async (_method, params) => {
+    sentParams = params
+    throw new Error("ZCode request timed out: session/send")
+  }
+  await assert.rejects(sender.sendPrompt("sess_indexed", "uncertain"), (error) => {
+    assert.equal(error.code, "ZCODE_ACK_UNCERTAIN")
+    assert.equal(error.sessionId, "sess_indexed")
+    assert.equal(error.inputId, sentParams.inputId)
+    assert.equal(error.queryId, sentParams.queryId)
+    return true
+  })
+  assert.deepEqual(storedState(), beforeRejected, "an unconfirmed acknowledgement must not invent a running state")
+  sender.request = async () => {
+    const error = new Error("ZCode app-server stopped (code=1)")
+    error.requestSubmitted = true
+    throw error
+  }
+  await assert.rejects(sender.sendPrompt("sess_indexed", "lost acknowledgement"), { code: "ZCODE_ACK_UNCERTAIN" })
+  assert.deepEqual(storedState(), beforeRejected, "a lost connection after submission must remain uncertain")
+  const unwritable = new ZCodeAppServer({ dataRoot })
+  unwritable.residentSessions.add("sess_indexed")
+  unwritable.subscriptions.add("sess_indexed")
+  unwritable.process = { exitCode: null, killed: false, stdin: { writable: true, write() { throw new Error("pipe closed before write") } } }
+  await assert.rejects(unwritable.sendPrompt("sess_indexed", "not written"), (error) => {
+    assert.equal(error.requestSubmitted, false)
+    assert.notEqual(error.code, "ZCODE_ACK_UNCERTAIN")
+    return true
+  })
+  assert.equal(unwritable.pending.size, 0, "synchronous write failure must clean its pending request and timer")
+  sender.request = async () => ({ accepted: true, turnId: "direct-turn" })
+  assert.equal((await sender.sendPrompt("sess_indexed", "accepted")).id, "direct-turn")
+  assert.equal(storedState().task_status, "running")
+  sender.request = async () => ({ accepted: true, turn: { id: "nested-turn" } })
+  assert.equal((await sender.sendPrompt("sess_indexed", "accepted nested")).id, "nested-turn")
+  sender.lastStartedTurns.set("sess_indexed", { id: "older-turn", startedAt: Date.now() - 1000 })
+  sender.request = async () => ({ accepted: true })
+  assert.equal((await sender.sendPrompt("sess_indexed", "no new event")).id, null, "an old turn ID must never be attached to a new prompt")
+  sender.request = async () => {
+    sender.lastStartedTurns.set("sess_indexed", { id: "observed-turn", startedAt: Date.now() })
+    return { accepted: true }
+  }
+  assert.equal((await sender.sendPrompt("sess_indexed", "new event")).id, "observed-turn")
+  upsertZCodeTaskIndex(dataRoot, sender.sessions.get("sess_indexed"), { status: "cancelled" })
+  assert.equal(storedState().task_status, "cancelled", "interrupted work must remain cancelled in the Desktop index")
 } finally { rmSync(dataRoot, { recursive: true, force: true }) }
 
 assert.equal(typeof resolveZCodeBundle, "function")

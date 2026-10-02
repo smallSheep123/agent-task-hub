@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
 
@@ -45,7 +45,12 @@ export async function sendPiCommand(dataRoot, session, type, text = "", { timeou
   mkdirSync(inbox, { recursive: true })
   mkdirSync(replies, { recursive: true })
   const path = join(inbox, `${id}.json`)
-  writeFileSync(path, JSON.stringify({ id, type, sessionId: session.id, text, createdAt: new Date().toISOString() }), { encoding: "utf8", flag: "wx", mode: 0o600 })
+  // Publish only complete commands: the extension polls this directory from another process.
+  const tempPath = `${path}.${randomUUID()}.tmp`
+  try {
+    writeFileSync(tempPath, JSON.stringify({ id, type, sessionId: session.id, text, createdAt: new Date().toISOString() }), { encoding: "utf8", flag: "wx", mode: 0o600 })
+    renameSync(tempPath, path)
+  } finally { try { rmSync(tempPath, { force: true }) } catch {} }
   const replyPath = join(replies, `${id}.json`)
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {

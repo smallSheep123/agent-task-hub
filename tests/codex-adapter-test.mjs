@@ -113,4 +113,37 @@ desktopClient.request = async (method) => {
 }
 await assert.rejects(desktopClient.sendPrompt("desktop_busy", "queue this"), (error) => error.code === "CODEX_TURN_ACTIVE")
 assert.deepEqual(desktopMethods, ["thread/read"], "Desktop busy detection must not resume or send another turn")
+
+const previousObserver = new CodexAppServer()
+const beforeDisconnect = Date.now() - 60000
+previousObserver.monitorStartedAt = beforeDisconnect
+previousObserver.monitorInitialized = true
+previousObserver.threadVersions.set("external-desktop", beforeDisconnect)
+previousObserver.observedTurns.add("already-notified")
+const afterReconnect = new CodexAppServer()
+afterReconnect.importMonitorState(previousObserver.exportMonitorState())
+afterReconnect.ready = true
+const completedAt = Date.now() - 1000
+const duringDisconnect = { id: "finished-offline", status: "completed", startedAt: beforeDisconnect + 1000, completedAt, items: [{ type: "agentMessage", text: "done while disconnected" }] }
+afterReconnect.request = async (method) => method === "thread/list"
+  ? { data: [{ id: "external-desktop", source: "vscode", updatedAt: completedAt }] }
+  : { thread: { id: "external-desktop", source: "vscode", turns: [duringDisconnect] } }
+const replayed = []
+afterReconnect.on("terminal", (event) => replayed.push(event))
+await afterReconnect.startMonitor()
+await new Promise((resolve) => setImmediate(resolve))
+assert.equal(afterReconnect.monitorStartedAt, beforeDisconnect)
+assert.equal(replayed.length, 1, "the first reconnected scan must reconcile work completed during disconnect")
+assert.equal(replayed[0].turnId, "finished-offline")
+assert.equal(afterReconnect.exportMonitorState().observedTurns.includes("already-notified"), true)
+await afterReconnect.stop()
+const anotherReconnect = new CodexAppServer()
+anotherReconnect.importMonitorState(afterReconnect.exportMonitorState())
+anotherReconnect.ready = true
+anotherReconnect.request = afterReconnect.request
+anotherReconnect.on("terminal", (event) => replayed.push(event))
+await anotherReconnect.startMonitor()
+await new Promise((resolve) => setImmediate(resolve))
+assert.equal(replayed.length, 1, "another reconnect must not duplicate the completion")
+await anotherReconnect.stop()
 console.log("CODEX_ADAPTER_TEST=PASS")

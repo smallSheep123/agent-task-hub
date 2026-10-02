@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here.
 
+## 0.7.2 - 2026-10-03
+
+### Fixed
+
+- Persist completion notices separately from queue progression. Telegram outages retry delivery without replaying completed instructions or holding up the next task.
+- Treat lost submission acknowledgements as uncertain delivery for all four agents. Preserve and pause those attempts instead of automatically resubmitting them; ignore late responses for a task that has already completed.
+- Reconcile Pi queues across process restarts using the absolute session file. Keep uncertain old attempts isolated; `/queue` offers review and archive buttons, followed by an explicit `/resume` for the remaining queue.
+- Publish Pi inbox commands atomically and retain temporarily unreadable commands. Use the final assistant outcome when a run recovers from an earlier error.
+- Preserve Codex monitoring checkpoints across adapter reconnections.
+- Keep ZCode index state unchanged on rejected sends, retain cancellation state, and monitor Desktop completions for previously subscribed sessions without duplicate notices.
+
+### Verification
+
+- Added regression coverage for submission uncertainty, reconnect monitoring, restarted Pi queues, stale confirmation buttons, duplicate completion events, and Telegram notification failures.
+- Existing Pi terminals need one `/reload` after installing the updated extension. A gateway restart alone cannot reload an extension inside another process.
+
 ## 0.7.1 - 2026-09-26
 
 ### Fixed

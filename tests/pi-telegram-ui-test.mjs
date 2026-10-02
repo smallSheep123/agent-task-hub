@@ -40,6 +40,22 @@ let piHandlers = null
 let nextUpdate = 1000
 let controller
 let output = ""
+const startController = () => {
+  controller = spawn(process.execPath, [resolve("app/controller.mjs")], {
+    cwd: resolve("."), windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, AGENT_TASK_HUB_DATA_DIR: root, AGENT_TASK_HUB_CONFIG: join(root, "config.json"),
+      AGENT_TASK_HUB_BOT_TOKEN: "123:LOCAL_TEST", AGENT_TASK_HUB_TELEGRAM_API_ROOT: `http://127.0.0.1:${server.address().port}`,
+      AGENT_TASK_HUB_PI_AGENT_DIR: agentDir, AGENT_TASK_HUB_CODEX_COMMAND: "missing-test-command" },
+  })
+  controller.stdout.on("data", (chunk) => { output += String(chunk) })
+  controller.stderr.on("data", (chunk) => { output += String(chunk) })
+}
+const stopController = async () => {
+  if (!controller || controller.exitCode != null) return
+  const stopped = new Promise((done) => controller.once("exit", done))
+  controller.kill()
+  await stopped
+}
 const server = createServer((request, response) => {
   let raw = ""
   request.on("data", (chunk) => { raw += chunk })
@@ -72,14 +88,7 @@ const waitFor = async (condition, description) => {
 
 try {
   await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen))
-  controller = spawn(process.execPath, [resolve("app/controller.mjs")], {
-    cwd: resolve("."), windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, AGENT_TASK_HUB_DATA_DIR: root, AGENT_TASK_HUB_CONFIG: join(root, "config.json"),
-      AGENT_TASK_HUB_BOT_TOKEN: "123:LOCAL_TEST", AGENT_TASK_HUB_TELEGRAM_API_ROOT: `http://127.0.0.1:${server.address().port}`,
-      AGENT_TASK_HUB_PI_AGENT_DIR: agentDir, AGENT_TASK_HUB_CODEX_COMMAND: "missing-test-command" },
-  })
-  controller.stdout.on("data", (chunk) => { output += String(chunk) })
-  controller.stderr.on("data", (chunk) => { output += String(chunk) })
+  startController()
   const user = { id: 900001, is_bot: false, first_name: "Test" }
   updates.push({ update_id: nextUpdate++, message: { message_id: 1, date: Math.floor(Date.now() / 1000), chat: { id: 900001, type: "private" }, from: user, text: "/pi" } })
   const list = await waitFor(() => sent.find((item) => String(item.text).includes("Browser project") && String(item.text).includes("Explain why")), "Pi list")
@@ -116,11 +125,12 @@ try {
   piHandlers = new Map()
   piExtension({ on: (name, handler) => piHandlers.set(name, handler), sendUserMessage: async (value) => { piPrompts.push(value) } })
   const liveFile = join(sessionsDir, `${saved[0].id}.jsonl`)
-  await piHandlers.get("session_start")({}, {
+  const piContext = {
     cwd: projectDir, model: { provider: "test", id: "model" }, thinkingLevel: "low",
     sessionManager: { getSessionId: () => saved[0].id, getSessionFile: () => liveFile, getSessionName: () => saved[0].name },
     abort: () => {},
-  })
+  }
+  await piHandlers.get("session_start")({}, piContext)
   const { listPiSessions } = await import("../adapters/pi-bridge.mjs")
   const [live] = listPiSessions(root)
   await sleep(8500)
@@ -142,6 +152,79 @@ try {
   const queueState = await waitFor(() => sent.find((item) => String(item.text).includes("First queued task") && String(item.text).includes("Second queued task")), "Pi queue after acknowledgement failures")
   assert.ok(queueState)
   assert.equal(sent.some((item) => String(item.text).includes("操作失败")), false)
+  // Completing a task must advance its queue even while Telegram cannot send the notice.
+  const completionEvent = { version: 1, backend: "pi", instanceId: live.instanceId,
+    id: "queue-first-complete", turnId: "queue-first-run", type: "session.idle",
+    createdAt: new Date().toISOString(), sessionId: live.id, title: "Browser project", directory: projectDir,
+    excerpt: "QueueCompletionNetworkTest" }
+  failAcknowledgement = "QueueCompletionNetworkTest"
+  writeFileSync(join(root, "events", "queue-complete.json"), JSON.stringify(completionEvent))
+  await waitFor(() => piPrompts.length === 2 && failedAcknowledgements === 3, "queue advances while completion notice fails")
+  assert.deepEqual(piPrompts, ["First queued task", "Second queued task"])
+  await waitFor(() => Object.values(JSON.parse(readFileSync(join(root, "state.json"), "utf8")).queueInFlight).some(item => item.text === "Second queued task" && item.dispatchState === "sent"), "second task acknowledgement persisted")
+  const persisted = JSON.parse(readFileSync(join(root, "state.json"), "utf8"))
+  assert.ok(persisted.processedEventIds.includes(completionEvent.id))
+  assert.equal(Object.values(persisted.queueInFlight).find(item => item.text === "Second queued task")?.dispatchState, "sent")
+  const outbox = JSON.parse(readFileSync(join(root, "events", "queue-complete.json"), "utf8"))
+  assert.equal(outbox.completionApplied, true)
+  assert.ok(outbox.nextAttemptAt)
+  writeFileSync(join(root, "events", "queue-duplicate.json"), JSON.stringify(completionEvent))
+  await sleep(1800)
+  assert.deepEqual(piPrompts, ["First queued task", "Second queued task"], "duplicate completion must not resubmit either prompt")
+  await waitFor(() => sent.some(item => String(item.text).includes("QueueCompletionNetworkTest")), "persisted completion is retried")
+
+  // Restart only the isolated fixture with an old Pi instance and keep the
+  // current sent task running. Review must not replay either old or new work.
+  await piHandlers.get("agent_start")({}, piContext)
+  await stopController()
+  const stateFile = join(root, "state.json")
+  const reviewState = JSON.parse(readFileSync(stateFile, "utf8"))
+  const currentKey = `pi:${live.instanceId}:${live.id}`
+  const oldKey = `pi:aaaaaaaaaaaa:${live.id}`
+  const currentTask = structuredClone(reviewState.queueInFlight[currentKey])
+  reviewState.queues[oldKey] = [{ id: "old-waiting", text: "Waiting after old process closed", createdAt: "2026-09-27T00:00:00Z" }]
+  reviewState.queueInFlight[oldKey] = { id: "old-uncertain", text: "Old attempt needing review", dispatchState: "sent", dispatchedAt: "2026-09-27T00:00:00Z" }
+  reviewState.queueStartOnIdle[oldKey] = true
+  writeFileSync(stateFile, JSON.stringify(reviewState))
+  const firstReviewMessage = sent.length
+  startController()
+  updates.push({ update_id: nextUpdate++, message: { message_id: 20, date: Math.floor(Date.now() / 1000), chat: { id: 900001, type: "private" }, from: user, text: "/queue" } })
+  const reviewQueue = await waitFor(() => sent.slice(firstReviewMessage).find((item) => item.reply_markup?.inline_keyboard?.flat().some((button) => String(button.callback_data).startsWith("qreview:"))), "migrated Pi queue review button")
+  assert.match(String(reviewQueue.text), /Waiting after old process closed/)
+  const reviewButton = reviewQueue.reply_markup.inline_keyboard.flat().find((button) => button.callback_data.startsWith("qreview:"))
+  const click = (data, label) => updates.push({ update_id: nextUpdate++, callback_query: { id: label, from: user, data,
+    message: { message_id: nextUpdate, chat: { id: 900001, type: "private" } } } })
+  click(reviewButton.callback_data, "review-old-queue")
+  const confirmMessage = await waitFor(() => sent.slice(firstReviewMessage).find((item) => item.reply_markup?.inline_keyboard?.flat().some((button) => String(button.callback_data).startsWith("qconfirm:"))), "old queue confirmation screen")
+  assert.match(String(confirmMessage.text), /Old attempt needing review/)
+  assert.match(String(confirmMessage.text), /不会重新执行/)
+  const confirmButton = confirmMessage.reply_markup.inline_keyboard.flat().find((button) => button.callback_data.startsWith("qconfirm:"))
+  click(confirmButton.callback_data, "confirm-old-queue")
+  await waitFor(() => sent.slice(firstReviewMessage).some((item) => String(item.text).includes("旧任务已归档")), "old queue archived")
+  const confirmedState = JSON.parse(readFileSync(stateFile, "utf8"))
+  assert.deepEqual(confirmedState.queueInFlight[currentKey], currentTask, "confirmation cannot delete the current sent task")
+  assert.equal(confirmedState.piQueueRecovery[currentKey], undefined)
+  assert.equal(confirmedState.queueInFlight[oldKey], undefined)
+  assert.deepEqual(confirmedState.queues[currentKey].map((item) => item.text), ["Waiting after old process closed"])
+  assert.equal(confirmedState.queuePaused[currentKey], true)
+  assert.equal(confirmedState.queueStartOnIdle[currentKey], false)
+  assert.equal(confirmedState.queueUncertaintyHistory.filter((entry) => entry.item.id === "old-uncertain").length, 1)
+  assert.deepEqual(piPrompts, ["First queued task", "Second queued task"])
+
+  // After new waiting work is appended, stale review and duplicate confirm
+  // callbacks cannot clear it or trigger execution.
+  updates.push({ update_id: nextUpdate++, message: { message_id: 21, date: Math.floor(Date.now() / 1000), chat: { id: 900001, type: "private" }, from: user, text: "/add New task after review" } })
+  await waitFor(() => JSON.parse(readFileSync(stateFile, "utf8")).queues[currentKey].some((item) => item.text === "New task after review"), "new work queued while paused")
+  const beforeOldClicks = sent.length
+  click(reviewButton.callback_data, "stale-review-old-queue")
+  click(confirmButton.callback_data, "repeat-confirm-old-queue")
+  await waitFor(() => sent.slice(beforeOldClicks).filter((item) => String(item.text).includes("队列已变化或按钮已过期")).length === 2, "stale and duplicate buttons rejected")
+  const afterOldClicks = JSON.parse(readFileSync(stateFile, "utf8"))
+  assert.deepEqual(afterOldClicks.queueInFlight[currentKey], currentTask)
+  assert.deepEqual(afterOldClicks.queues[currentKey].map((item) => item.text), ["Waiting after old process closed", "New task after review"])
+  assert.equal(afterOldClicks.queueUncertaintyHistory.length, confirmedState.queueUncertaintyHistory.length)
+  assert.equal(afterOldClicks.queuePaused[currentKey], true)
+  assert.deepEqual(piPrompts, ["First queued task", "Second queued task"])
   console.log("PI_TELEGRAM_UI_TEST=PASS")
 } finally {
   await piHandlers?.get("session_shutdown")?.()

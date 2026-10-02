@@ -82,7 +82,9 @@ export default function piAgentTaskHub(pi) {
     for (const name of readdirSync(inbox).filter((value) => /^[0-9a-f-]{36}\.json$/.test(value)).slice(0, 20)) {
       const path = join(inbox, name)
       let command
-      try { command = JSON.parse(readFileSync(path, "utf8")) } catch { rmSync(path, { force: true }); continue }
+      // A legacy writer or transient read failure can expose an incomplete file.
+      // Leave it for a later poll instead of silently discarding a user command.
+      try { command = JSON.parse(readFileSync(path, "utf8")) } catch (error) { reportError(error); continue }
       rmSync(path, { force: true })
       let reply = { ok: false, error: "Unsupported Pi command" }
       try {
@@ -131,7 +133,8 @@ export default function piAgentTaskHub(pi) {
   pi.on("message_end", async (event) => {
     if (event.message?.role !== "assistant") return
     latestReply = assistantText(event.message) || latestReply
-    if (event.message.stopReason === "error" || event.message.stopReason === "aborted") latestError = event.message.errorMessage || event.message.stopReason
+    latestError = event.message.stopReason === "error" || event.message.stopReason === "aborted"
+      ? event.message.errorMessage || event.message.stopReason : null
   })
   pi.on("agent_settled", async (_event, ctx) => {
     context = ctx

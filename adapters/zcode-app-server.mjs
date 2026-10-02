@@ -47,7 +47,25 @@ function taskStatus(value) {
   const status = String(value || "completed").toLowerCase()
   if (["running", "waiting", "paused", "active", "busy"].includes(status)) return "running"
   if (["error", "failed"].includes(status)) return "error"
+  if (["cancelled", "canceled", "interrupted"].includes(status)) return "cancelled"
   return "completed"
+}
+
+function localTurnKey(dataRoot, sessionId, finishedAt) {
+  const path = join(dirname(dataRoot), "cli", "db", "db.sqlite")
+  if (!existsSync(path)) return ""
+  let db
+  try {
+    db = new DatabaseSync(path, { readOnly: true })
+    const rows = db.prepare("SELECT id, data FROM message WHERE session_id = ? AND time_created <= ? ORDER BY time_created DESC LIMIT 100")
+      .all(String(sessionId), timestamp(finishedAt))
+    for (const row of rows) {
+      let info
+      try { info = JSON.parse(row.data) } catch { continue }
+      if (info.role === "user" && !info.synthetic) return String(row.id)
+    }
+  } catch {} finally { db?.close() }
+  return ""
 }
 
 function modelText(value) {
@@ -464,9 +482,11 @@ export class ZCodeAppServer extends EventEmitter {
     this.residentSessions = new Set()
     this.seenEventIds = new Set()
     this.activeStartedAt = new Map()
+    this.lastStartedTurns = new Map()
     this.sessionVersions = new Map()
     this.sessionPolledAt = new Map()
     this.indexSnapshot = new Map()
+    this.lastTerminals = new Map()
     this.monitorStartedAt = 0
     this.monitorTimer = null
     this.monitorBusy = false
@@ -504,6 +524,7 @@ export class ZCodeAppServer extends EventEmitter {
     child.stderr?.setEncoding?.("utf8")
     child.stderr?.on?.("data", (chunk) => { this.stderr = (this.stderr + chunk).slice(-8000) })
     child.once("error", (error) => this.#fail(error))
+    child.stdin?.on?.("error", (error) => this.#fail(error))
     child.once("exit", (code, signal) => {
       const detail = this.stderr.trim().split(/\r?\n/).slice(-3).join("\n")
       this.#fail(new Error(`ZCode app-server stopped (code=${code}, signal=${signal || "none"})${detail ? `: ${detail}` : ""}`))
@@ -524,11 +545,23 @@ export class ZCodeAppServer extends EventEmitter {
     const id = this.nextId++
     return new Promise((resolvePromise, reject) => {
       const timer = setTimeout(() => {
+        const pending = this.pending.get(id)
         this.pending.delete(id)
-        reject(new Error(`ZCode request timed out: ${method}`))
+        const error = new Error(`ZCode request timed out: ${method}`)
+        error.requestSubmitted = Boolean(pending?.submitted)
+        reject(error)
       }, timeoutMs)
-      this.pending.set(id, { method, resolve: resolvePromise, reject, timer })
-      this.#write({ id, method, params })
+      const pending = { method, resolve: resolvePromise, reject, timer, submitted: false }
+      this.pending.set(id, pending)
+      try {
+        this.#write({ id, method, params })
+        pending.submitted = true
+      } catch (error) {
+        clearTimeout(timer)
+        this.pending.delete(id)
+        error.requestSubmitted = false
+        reject(error)
+      }
     })
   }
 
@@ -576,7 +609,12 @@ export class ZCodeAppServer extends EventEmitter {
 
   #fail(error) {
     this.ready = false
-    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error) }
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer)
+      const failure = new Error(error.message, { cause: error })
+      failure.requestSubmitted = pending.submitted
+      pending.reject(failure)
+    }
     this.pending.clear()
   }
 
@@ -671,10 +709,33 @@ export class ZCodeAppServer extends EventEmitter {
       })
     }
     await this.#subscribe(id)
-    this.#syncTaskIndex(this.sessions.get(id) || { sessionId: id }, { status: "running", updatedAt: Date.now() })
-    const result = await this.request("session/send", { sessionId: id, content: String(content), inputId: randomUUID(), queryId: randomUUID() }, 60000)
+    const sentAt = Date.now()
+    const inputId = randomUUID()
+    const queryId = randomUUID()
+    const previousTurn = this.lastStartedTurns.get(id)
+    const observedTurnId = () => {
+      const turn = this.lastStartedTurns.get(id)
+      return turn && turn !== previousTurn && turn.startedAt >= sentAt ? turn.id : null
+    }
+    let result
+    try {
+      result = await this.request("session/send", { sessionId: id, content: String(content), inputId, queryId }, 60000)
+    } catch (error) {
+      if (error.requestSubmitted === true || (error.requestSubmitted !== false && /timed out/i.test(error.message))) {
+        error.code = "ZCODE_ACK_UNCERTAIN"
+        error.sessionId = id
+        error.inputId = inputId
+        error.queryId = queryId
+        error.turnId = observedTurnId()
+      }
+      throw error
+    }
     if (result?.accepted !== true) throw new Error("ZCode did not accept the prompt")
-    return { id: null, accepted: result?.accepted === true }
+    // A fast turn may finish before the acknowledgement reaches us.
+    if (Number(this.lastTerminals.get(id)?.finishedAt || 0) < sentAt) {
+      this.#syncTaskIndex(this.sessions.get(id) || { sessionId: id }, { status: "running", updatedAt: sentAt })
+    }
+    return { id: result.turnId || result.turn?.id || observedTurnId() || null, accepted: true }
   }
 
   async startSession({ cwd, model = null, thoughtLevel = "high", mode = "build", title = null } = {}) {
@@ -739,15 +800,36 @@ export class ZCodeAppServer extends EventEmitter {
     const sequence = Number(event.seq || event.sequenceNumber || 0)
     if (sequence > 0) this.eventSeq.set(sessionId, Math.max(this.eventSeq.get(sessionId) || 0, sequence))
     if (event.type === "turn.started") {
-      this.activeStartedAt.set(sessionId, timestamp(event.timestamp) || Date.now())
+      const startedAt = timestamp(event.timestamp) || Date.now()
+      this.activeStartedAt.set(sessionId, startedAt)
+      if (event.turnId) this.lastStartedTurns.set(sessionId, { id: String(event.turnId), startedAt })
       this.#syncTaskIndex(this.sessions.get(sessionId) || { sessionId }, { status: "running", updatedAt: event.timestamp })
     }
     if (event.type === "turn.completed" || event.type === "turn.failed") {
       this.activeStartedAt.delete(sessionId)
       const terminal = zcodeTerminalEvent(event, this.sessions.get(sessionId))
-      this.#syncTaskIndex(this.sessions.get(sessionId) || { sessionId }, { status: terminal.type === "session.error" ? "error" : terminal.type === "session.interrupted" ? "cancelled" : "completed", updatedAt: event.timestamp })
-      this.emit("terminal", terminal)
+      const status = terminal.type === "session.error" ? "error" : terminal.type === "session.interrupted" ? "cancelled" : "completed"
+      const finishedAt = Date.parse(terminal.createdAt)
+      const indexed = this.indexSnapshot.get(sessionId)
+      if (!indexed || indexed.updatedAt <= finishedAt) {
+        this.#syncTaskIndex(this.sessions.get(sessionId) || { sessionId }, { status, updatedAt: finishedAt })
+        // This write is already represented by the RPC event, so the index
+        // monitor should only announce later Desktop turns.
+        this.indexSnapshot.set(sessionId, { status, updatedAt: finishedAt })
+      }
+      this.#emitTerminal(terminal, "rpc")
     }
+  }
+
+  #emitTerminal(event, source) {
+    const finishedAt = Date.parse(event.createdAt)
+    const turnKey = localTurnKey(this.dataRoot, event.sessionId, finishedAt)
+    const previous = this.lastTerminals.get(event.sessionId)
+    if (previous && ((event.turnId && previous.turnId === event.turnId)
+      || (turnKey && previous.turnKey === turnKey)
+      || (previous.source !== source && previous.finishedAt === finishedAt))) return
+    this.lastTerminals.set(event.sessionId, { source, turnId: event.turnId, turnKey, finishedAt })
+    this.emit("terminal", { ...event, ...(turnKey ? { taskMessageId: turnKey } : {}) })
   }
 
   deferBackgroundPoll(durationMs = 5000) {
@@ -792,11 +874,10 @@ export class ZCodeAppServer extends EventEmitter {
       const current = { status: String(row.task_status || "").toLowerCase(), updatedAt: timestamp(row.updated_at) }
       const previous = this.indexSnapshot.get(id)
       this.indexSnapshot.set(id, current)
-      if (this.subscriptions.has(id) || this.residentSessions.has(id)) continue
       if (!zcodeIndexCompletion(previous, current, this.monitorStartedAt)) continue
       const failed = current.status === "error" || current.status === "failed"
       const cancelled = current.status === "cancelled"
-      this.emit("terminal", {
+      this.#emitTerminal({
         version: 1, backend: "zcode", instanceId: ZCODE_INSTANCE_ID,
         id: `zcode-index:${id}:${current.updatedAt}`,
         turnId: `index:${current.updatedAt}`,
@@ -806,7 +887,7 @@ export class ZCodeAppServer extends EventEmitter {
         title: String(row.title || "ZCode session"), directory: String(row.workspace_path || ""),
         excerpt: failed || cancelled ? "" : zcodeLocalReply(this.dataRoot, id, current.updatedAt),
         error: failed ? "ZCode task failed" : null,
-      })
+      }, "index")
     }
   }
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { appendFileSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { findPiHistory, listPiSessions, piResumeCommand, sendPiCommand } from "../adapters/pi-bridge.mjs"
@@ -54,6 +54,18 @@ try {
   assert.ok(Buffer.byteLength(encodeSessionAction("sendhelp", session), "utf8") <= 64)
   assert.equal((await sendPiCommand(root, session, "send", "hello")).ok, true)
   assert.deepEqual(sent, ["hello"])
+  assert.equal(readdirSync(join(root, "pi", "inbox", session.instanceId)).some((name) => name.endsWith(".tmp")), false)
+  // Simulate a legacy writer exposing a partial command. A poll must not delete it.
+  const partialId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+  const partialPath = join(root, "pi", "inbox", session.instanceId, `${partialId}.json`)
+  writeFileSync(partialPath, '{"type":"send",')
+  await new Promise((resolve) => setTimeout(resolve, 850))
+  assert.equal(existsSync(partialPath), true)
+  assert.deepEqual(sent, ["hello"])
+  writeFileSync(partialPath, JSON.stringify({ id: partialId, type: "send", sessionId, text: "recovered partial command" }))
+  await new Promise((resolve) => setTimeout(resolve, 850))
+  assert.deepEqual(sent, ["hello", "recovered partial command"])
+  assert.equal(existsSync(partialPath), false)
   await handlers.get("agent_start")({}, context)
   assert.equal(listPiSessions(root)[0].status, "busy")
   const fullReply = `done\n${"中文完整回复。".repeat(400)}`
@@ -67,6 +79,22 @@ try {
   assert.equal(event.excerpt, fullReply)
   assert.equal((await latestPiReply(sessionFile)).text, fullReply)
   assert.equal(event.instanceId, session.instanceId)
+  // Use one run deliberately: the final assistant outcome supersedes an earlier
+  // assistant failure, independent of whether the host emits agent_start on retries.
+  await handlers.get("agent_start")({}, context)
+  await handlers.get("message_end")({ message: { role: "assistant", stopReason: "error", errorMessage: "temporary failure", content: [] } }, context)
+  await handlers.get("message_end")({ message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "recovered successfully" }] } }, context)
+  await handlers.get("agent_settled")({}, context)
+  const outcomes = () => readdirSync(join(root, "events")).map((name) => JSON.parse(readFileSync(join(root, "events", name), "utf8")))
+  const recovered = outcomes().find((item) => item.excerpt === "recovered successfully")
+  assert.equal(recovered.type, "session.idle")
+  assert.equal(recovered.error, null)
+  assert.equal(listPiSessions(root)[0].lastError, null)
+  await handlers.get("agent_start")({}, context)
+  await handlers.get("message_end")({ message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "partial work" }] } }, context)
+  await handlers.get("message_end")({ message: { role: "assistant", stopReason: "error", errorMessage: "final failure", content: [] } }, context)
+  await handlers.get("agent_settled")({}, context)
+  assert.equal(outcomes().find((item) => item.error === "final failure").type, "session.error")
   assert.equal((await sendPiCommand(root, session, "abort")).ok, true)
   assert.equal(sent.at(-1), "abort")
   await handlers.get("session_shutdown")()

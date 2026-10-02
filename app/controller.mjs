@@ -8,6 +8,8 @@ import { createI18n } from "./locales.mjs"
 import { decodeSessionAction, encodeSessionAction, enterAgentMode, enterGlobalMode, filterAgentSessions, initializeAgentContext, migrateSessionCollections, selectAgentSession, sessionIdentity } from "./agent-context.mjs"
 import { codexTaskStartedAt, codexThreadAppearsActive, elapsedDurationParts, isRunningStatus, openCodeTaskStartedAt, timestampMilliseconds } from "./dashboard.mjs"
 import { SessionDiscoveryCache } from "./session-discovery-cache.mjs"
+import { reconcilePiQueueInstances, piQueueNeedsConfirmation } from "./pi-queue-recovery.mjs"
+import { queueUncertaintySnapshot, confirmQueueUncertainty } from "./queue-uncertainty.mjs"
 import { telegramMarkdownBody } from "./telegram-markdown.mjs"
 import { telegramTextParts } from "./telegram-long-text.mjs"
 import { approvalOptionsForRequest, approvalResponseForRequest, CodexAppServer, terminalEventFromNotification } from "../adapters/codex-app-server.mjs"
@@ -34,6 +36,7 @@ let codexClient = null
 let codexStartPromise = null
 let codexLastError = null
 let codexRetryAfter = 0
+let codexMonitorCheckpoint = null
 let codexDefaultCommand = process.env.AGENT_TASK_HUB_CODEX_COMMAND || "codex"
 let codexDefaultTransport = process.env.AGENT_TASK_HUB_CODEX_TRANSPORT || "private"
 let codexDefaultWsUrl = process.env.AGENT_TASK_HUB_CODEX_WS_URL || ""
@@ -56,6 +59,7 @@ async function ensureCodexClient(command = null, transport = null) {
   if (codexStartPromise) return codexStartPromise
   if (Date.now() < codexRetryAfter && codexLastError) throw codexLastError
   codexStartPromise = (async () => {
+    codexMonitorCheckpoint = codexClient?.exportMonitorState?.() || codexMonitorCheckpoint
     const client = new CodexAppServer({
       command: command || codexDefaultCommand,
       transport: transport || codexDefaultTransport,
@@ -63,10 +67,12 @@ async function ensureCodexClient(command = null, transport = null) {
     })
     try {
       await client.start()
+      if (codexMonitorCheckpoint) client.importMonitorState?.(codexMonitorCheckpoint)
       codexClient = client
       codexLastError = null
       codexRetryAfter = 0
       client.once("exit", ({ detail }) => {
+        codexMonitorCheckpoint = client.exportMonitorState?.() || codexMonitorCheckpoint
         if (codexClient === client) codexClient = null
         codexLastError = new Error(detail || "Codex app-server stopped")
         codexRetryAfter = Date.now() + 15000
@@ -1359,7 +1365,7 @@ async function main(options = {}) {
     const id = String(event.id || "")
     if (id && !state.processedEventIds.includes(id)) state.processedEventIds.push(id)
     state.processedEventIds = state.processedEventIds.slice(-500)
-    if (event.sessionId) state.recentEvents[migrateSessionState(event)] = { fingerprint: eventFingerprint(event), turnId: event.turnId || null, at: event.createdAt || new Date().toISOString() }
+    if (event.sessionId) state.recentEvents[migrateSessionState(event)] = { fingerprint: eventFingerprint(event), turnId: event.turnId || null, taskMessageId: event.taskMessageId || null, at: event.createdAt || new Date().toISOString() }
     saveState()
   }
 
@@ -1367,6 +1373,7 @@ async function main(options = {}) {
     if (event.id && state.processedEventIds.includes(String(event.id))) return true
     const recent = event.sessionId ? state.recentEvents[migrateSessionState(event)] : null
     if (event.turnId && recent?.turnId === event.turnId) return true
+    if (event.taskMessageId && recent?.taskMessageId === event.taskMessageId) return true
     if (activeQueueItem && Date.parse(event.createdAt || 0) >= Date.parse(activeQueueItem.dispatchedAt || 0)) return false
     return Boolean(recent
       && recent.fingerprint === eventFingerprint(event)
@@ -1377,6 +1384,40 @@ async function main(options = {}) {
     const key = migrateSessionState(session)
     if (!Array.isArray(state.queues[key])) state.queues[key] = []
     return state.queues[key]
+  }
+
+  function syncPiQueueInstances(sessions = []) {
+    const historyDir = join(dataRoot, "pi", "history")
+    const history = existsSync(historyDir) ? readdirSync(historyDir).filter((name) => name.endsWith(".json")).map((name) => readJson(join(historyDir, name))).filter(Boolean) : []
+    const catalog = [...sessionDiscoveryCache.snapshot("Pi"), ...sessions.filter((session) => session.backend === "pi")]
+      .map((session) => ({ ...session, status: "closed" }))
+    catalog.push(...listPiSessions(dataRoot))
+    const unique = [...new Map(catalog.map((session) => [sessionStateKey(session), session])).values()]
+    const report = reconcilePiQueueInstances(state, unique, history)
+    if (report.changed) {
+      saveState()
+      log("INFO", `Pi queue recovery migrated=${report.migrations.length} conflicts=${report.conflicts.length}`)
+    }
+    return report
+  }
+
+  function queueNeedsConfirmation(key) {
+    return state.queueInFlight[key]?.dispatchState === "uncertain" || piQueueNeedsConfirmation(state, key)
+  }
+
+  function queueRecoveryNote() {
+    return i18n.language === "zh-CN" ? "有指令的执行结果待确认，队列已暂停。请先核对会话结果，不要重复发送原指令。" : "Delivery is uncertain; the queue is paused. Check the session result before submitting the same prompt again."
+  }
+
+  async function showQueue(session) {
+    const text = queueSummary(session)
+    const snapshot = queueUncertaintySnapshot(state, migrateSessionState(session))
+    if (!snapshot.count) return send(text)
+    state.queueChecks ||= {}
+    state.queueChecks[snapshot.fingerprint] = { key: snapshot.sessionKey, at: Date.now() }
+    state.queueChecks = Object.fromEntries(Object.entries(state.queueChecks).slice(-100))
+    saveState()
+    return send(text, { reply_markup: { inline_keyboard: [[{ text: i18n.language === "zh-CN" ? `核对 ${snapshot.count} 条旧任务` : `Review ${snapshot.count} uncertain tasks`, callback_data: `qreview:${snapshot.fingerprint}` }]] } })
   }
 
   async function currentSessionStatus(session) {
@@ -1398,12 +1439,15 @@ async function main(options = {}) {
   }
 
   async function dispatchNext(session) {
+    if (session.backend === "pi") syncPiQueueInstances([session])
     const key = migrateSessionState(session)
     const queue = waitingQueue(session)
-    if (state.queuePaused[key] || state.queueInFlight[key] || queue.length === 0) return null
+    if (state.queuePaused[key] || state.queueInFlight[key] || queueNeedsConfirmation(key) || queue.length === 0) return null
     const item = queue.shift()
     item.dispatchedAt = new Date().toISOString()
+    item.sessionFile = session.sessionFile || item.sessionFile || null
     item.dispatchState = "dispatching"
+    item.session = { id: session.id, backend: session.backend || "opencode", instanceId: session.instanceId || null, serverUrl: session.serverUrl || null, title: session.title, directory: session.directory, sessionFile: session.sessionFile || null }
     state.queueInFlight[key] = item
     state.queueStartOnIdle[key] = false
     saveState()
@@ -1419,22 +1463,34 @@ async function main(options = {}) {
       } else if (session.backend === "pi") {
         await sendPiCommand(dataRoot, session, "send", item.text)
       } else {
-        await requestSessionJson(session, `/session/${encodeURIComponent(session.id)}/prompt_async`, {
+        try { await requestSessionJson(session, `/session/${encodeURIComponent(session.id)}/prompt_async`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ parts: [{ type: "text", text: item.text }] }),
-        })
+        }) } catch (error) {
+          // A transport failure, server error, or malformed success response can follow acceptance.
+          if (["AbortError", "SyntaxError"].includes(error?.name) || /fetch failed|socket|connection|timed out|HTTP 5\d\d/i.test(error?.message || "")) error.code = "OPENCODE_ACK_UNCERTAIN"
+          throw error
+        }
       }
       item.dispatchState = "sent"
       item.sentAt = new Date().toISOString()
-      state.queueInFlight[key] = item
+      if (state.queueInFlight[key]?.id === item.id) state.queueInFlight[key] = item
       saveState()
       log("AUDIT", `queue dispatched session=${session.id} item=${item.id} remaining=${queue.length}`)
       return { item, remaining: queue.length }
     } catch (error) {
-      if (session.backend === "pi" && error?.code === "PI_ACK_UNCERTAIN") {
+      if (state.queueInFlight[key]?.id !== item.id) {
+        log("INFO", `Late dispatch response ignored for completed item=${item.id}`)
+        return { item, remaining: queue.length }
+      }
+      if (["PI_ACK_UNCERTAIN", "CODEX_ACK_UNCERTAIN", "ZCODE_ACK_UNCERTAIN", "OPENCODE_ACK_UNCERTAIN"].includes(error?.code)) {
+        item.dispatchState = "uncertain"
+        if (error.turnId) item.turnId = error.turnId
+        item.lastError = String(error.message || error)
         state.queuePaused[key] = true
         saveState()
+        error.message = `${queueRecoveryNote()} ${error.message}`
         throw error
       }
       queue.unshift(item)
@@ -1459,11 +1515,13 @@ async function main(options = {}) {
   }
 
   function queueSummary(session) {
+    if (session.backend === "pi") syncPiQueueInstances()
     const key = migrateSessionState(session)
     const queue = waitingQueue(session)
     const active = state.queueInFlight[key]
     const paused = Boolean(state.queuePaused[key])
     const lines = [
+      queueNeedsConfirmation(key) ? queueRecoveryNote() : null,
       t("queueState", paused ? t("queuePaused") : t("queueAutomatic")),
       t("activeQueue", active ? `${active.batchTotal > 1 ? `[${active.batchIndex}/${active.batchTotal}] ` : ""}${active.text}` : t("none")),
       active?.dispatchedAt ? t("elapsed", durationText(active.dispatchedAt)) : null,
@@ -2037,7 +2095,7 @@ async function main(options = {}) {
     const selected = await resolveSelected()
     if (!selected) return send(t("selectFirst"))
     if (command.name === "show") return selected.backend === "pi" ? sendLongText(await getSessionView(selected)) : send(await getSessionView(selected))
-    if (command.name === "queue") return send(queueSummary(selected))
+    if (command.name === "queue") return showQueue(selected)
     if (command.name === "send" && !command.arg) return send(t("sendHelp", selected.title))
     if (selected.backend === "pi" && ["send", "add", "batch", "resume", "stop"].includes(command.name)
       && !listPiSessions(dataRoot).some((item) => item.id === selected.id && item.instanceId === selected.instanceId)) {
@@ -2115,6 +2173,8 @@ async function main(options = {}) {
     }
     if (command.name === "resume") {
       const key = migrateSessionState(selected)
+      if (selected.backend === "pi") syncPiQueueInstances()
+      if (queueNeedsConfirmation(key)) return showQueue(selected)
       state.queuePaused[key] = false
       saveState()
       const status = await currentSessionStatus(selected)
@@ -2136,53 +2196,34 @@ async function main(options = {}) {
       return send(t("confirmClear", count), { reply_markup: { inline_keyboard: [[{ text: t("confirmClearButton"), callback_data: encodeSessionAction("clearq", selected) }, { text: t("cancel"), callback_data: "cancel" }]] } })
     }
     if (command.name === "send") {
-      if ((selected.backend || "opencode") === "codex") {
-        const key = migrateSessionState(selected)
-        const client = await ensureCodexClient(config.codexCommand || null)
-        const knownBusy = state.queueInFlight[key] || client.activeTurns.has(String(selected.id))
-        if (knownBusy) return queueVisibleCodexTurn(selected, command.arg, "busy")
+      const key = migrateSessionState(selected)
+      const queue = waitingQueue(selected)
+      if (queue.length + (state.queueInFlight[key] ? 1 : 0) >= Number(config.queueLimit || 20)) return send(t("queueFull", Number(config.queueLimit || 20)))
+      const [item] = makeQueueItems([command.arg])
+      item.source = "send"
+      queue.push(item)
+      saveState()
+      const status = state.queueInFlight[key] ? "busy" : await currentSessionStatus(selected)
+      if (status === "idle" && !state.queuePaused[key] && !state.queueInFlight[key]) {
         try {
-          await client.sendPrompt(selected.id, command.arg)
-          selected.status = "busy"
-          selected.updatedAt = Date.now()
-          sessionDiscoveryCache.remember("Codex", selected)
-          saveState()
-        } catch (error) {
-          if (error?.code === "CODEX_TURN_ACTIVE" || /already has an active (?:turn|writer)/i.test(String(error?.message || error))) {
-            return queueVisibleCodexTurn(selected, command.arg, "busy")
+          const started = await dispatchNext(selected)
+          if (!started) return queueNeedsConfirmation(key) ? showQueue(selected) : sendAccepted(t("added", status, waitingQueue(selected).length), "send", selected)
+        }
+        catch (error) {
+          if (error?.code === "CODEX_TURN_ACTIVE") {
+            state.queueStartOnIdle[key] = true
+            saveState()
+            return sendAccepted(t("added", "busy", queue.length), "send", selected)
           }
-          throw error
+          return send(t("savedStartFailed", compact(error.message, 300)))
         }
-      } else if (selected.backend === "zcode") {
-        const client = await ensureZCodeClient(config.zcodeBundle || null)
-        await client.sendPrompt(selected.id, command.arg)
-        selected.status = "busy"
-        selected.updatedAt = Date.now()
-        sessionDiscoveryCache.remember("ZCode", selected)
-      } else if (selected.backend === "pi") {
-        const live = listPiSessions(dataRoot).find((item) => item.id === selected.id && item.instanceId === selected.instanceId)
-        if (live?.status === "busy" || state.queueInFlight[migrateSessionState(selected)]) {
-          const queue = waitingQueue(selected)
-          const [item] = makeQueueItems([command.arg])
-          item.source = "send"
-          queue.push(item)
-          state.queueStartOnIdle[migrateSessionState(selected)] = true
-          saveState()
-          return sendAccepted(t("added", "busy", queue.length), "send", selected)
-        }
-        await sendPiCommand(dataRoot, selected, "send", command.arg)
-        selected.status = "busy"
-        saveState()
-      } else {
-        const id = encodeURIComponent(selected.id)
-        await requestSessionJson(selected, `/session/${id}/prompt_async`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ parts: [{ type: "text", text: command.arg }] }),
-        })
+        return sendAccepted(t("sentAgent", backendText(selected.backend)), "send", selected)
       }
-      return sendAccepted(t("sentAgent", backendText(selected.backend)), "send", selected)
+      state.queueStartOnIdle[key] = true
+      saveState()
+      return sendAccepted(t("added", status, queue.length), "send", selected)
     }
+
     if (command.name === "stop") {
       return send(t("confirmStop", selected.title), { reply_markup: { inline_keyboard: [[{ text: t("confirmStopButton"), callback_data: encodeSessionAction("abort", selected) }, { text: t("cancel"), callback_data: "cancel" }]] } })
     }
@@ -2379,7 +2420,27 @@ async function main(options = {}) {
         const target = decodeSessionAction(data, "queue")
         const session = await resolveActionSession(target)
         if (!session) throw new Error(t("sessionUnavailable"))
-        await send(queueSummary(session))
+        await showQueue(session)
+      } else if (/^q(review|confirm):[0-9a-f]{24}$/.test(data)) {
+        await telegram("answerCallbackQuery", { callback_query_id: query.id })
+        callbackAnswered = true
+        const [action, fingerprint] = data.split(":")
+        const check = state.queueChecks?.[fingerprint]
+        const snapshot = check ? queueUncertaintySnapshot(state, check.key) : null
+        if (!snapshot?.count || snapshot.fingerprint !== fingerprint || Date.now() - check.at > 600000) {
+          return send(i18n.language === "zh-CN" ? "队列已变化或按钮已过期，请重新发送 /queue。" : "The queue changed or this button expired. Open /queue again.")
+        }
+        if (action === "qreview") {
+          const items = snapshot.items.map((entry, index) => `${index + 1}. ${compact(entry.item?.text || entry.item?.id || "?", 220)}`).join("\n")
+          const note = i18n.language === "zh-CN" ? "请先查看会话结果。确认后将归档以下旧任务，不会重新执行；剩余队列保持暂停，使用 /resume 继续。" : "Check the session results first. Confirming archives these old attempts without replaying them. The remaining queue stays paused; use /resume to continue."
+          return send(compact(`${note}\n\n${items}`), { reply_markup: { inline_keyboard: [[{ text: i18n.language === "zh-CN" ? "已核对，归档旧任务" : "Reviewed: archive old attempts", callback_data: `qconfirm:${fingerprint}` }, { text: t("cancel"), callback_data: "cancel" }]] } })
+        }
+        const result = confirmQueueUncertainty(state, check.key, fingerprint, { confirmedAt: new Date().toISOString() })
+        if (result.confirmed) {
+          delete state.queueChecks[fingerprint]
+          saveState()
+          return send(i18n.language === "zh-CN" ? "旧任务已归档。剩余指令仍在队列中，请回到对应会话后发送 /resume 继续。" : "Old attempts archived. Select this session and use /resume to run the remaining queue.")
+        }
       } else if (data.startsWith("stopask:")) {
         await telegram("answerCallbackQuery", { callback_query_id: query.id })
         callbackAnswered = true
@@ -2472,13 +2533,14 @@ async function main(options = {}) {
     return { reply_markup: { inline_keyboard: rows } }
   }
 
-  function pendingCompletionExists(session, dispatchedAt) {
+  function pendingCompletionExists(session, item) {
     const expectedKey = sessionStateKey(session)
     return readdirSync(eventsDir, { withFileTypes: true })
       .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
       .some((entry) => {
         const event = readJson(join(eventsDir, entry.name))
-        return event?.sessionId && sessionStateKey(event) === expectedKey && Date.parse(event.createdAt || 0) >= Date.parse(dispatchedAt || 0)
+        return !event?.completionApplied && event?.sessionId && sessionStateKey(event) === expectedKey
+          && (!item.turnId || event.turnId === item.turnId) && Date.parse(event.createdAt || 0) >= Date.parse(item.dispatchedAt || 0)
       })
   }
 
@@ -2508,7 +2570,8 @@ async function main(options = {}) {
       const sentAtSeconds = Math.floor(Date.parse(item.dispatchedAt || item.createdAt || 0) / 1000)
       const turns = Array.isArray(thread?.turns) ? thread.turns : []
       const turn = (item.turnId ? turns.find((candidate) => candidate.id === item.turnId) : null)
-        || [...turns].reverse().find((candidate) => Number(candidate.startedAt || 0) >= sentAtSeconds - 5)
+        || (!item.turnId ? [...turns].reverse().find((candidate) => Number(candidate.startedAt || 0) >= sentAtSeconds - 5
+          && (candidate.items || []).some((entry) => entry.type === "userMessage" && (typeof entry.content === "string" ? entry.content : (entry.content || []).filter((part) => part.type === "text").map((part) => part.text || "").join("\n")).trim() === String(item.text || "").trim())) : null)
       if (!turn || !["completed", "failed", "interrupted"].includes(turn.status)) return false
       const payload = terminalEventFromNotification({ threadId: session.id, turn }, thread)
       payload.recovered = true
@@ -2519,7 +2582,8 @@ async function main(options = {}) {
       const client = await ensureZCodeClient(config.zcodeBundle || null)
       const result = await client.request("session/events", { sessionId: session.id, limit: 200 })
       const sentAt = Date.parse(item.dispatchedAt || item.createdAt || 0)
-      const event = [...(result?.events || [])].reverse().find((candidate) => ["turn.completed", "turn.failed"].includes(candidate?.type) && timestampMilliseconds(candidate?.timestamp) >= sentAt - 5000)
+      if (!item.turnId) return false
+      const event = [...(result?.events || [])].reverse().find((candidate) => candidate?.turnId === item.turnId && ["turn.completed", "turn.failed"].includes(candidate?.type) && timestampMilliseconds(candidate?.timestamp) >= sentAt - 5000)
       if (!event) return false
       const payload = zcodeTerminalEvent(event, { sessionId: session.id, title: session.title, workspace: { workspacePath: session.directory } })
       payload.recovered = true
@@ -2561,37 +2625,42 @@ async function main(options = {}) {
   }
 
   async function reconcileQueues() {
-    const activeEntries = Object.entries(state.queueInFlight)
-    if (!activeEntries.length) return
     const sessions = await discoverSessions()
+    syncPiQueueInstances(sessions)
+    const activeEntries = Object.entries(state.queueInFlight)
     const byKey = new Map(sessions.map((session) => [sessionStateKey(session), session]))
     const byLegacyId = new Map(sessions.map((session) => [session.id, session]))
     for (const [storedKey, originalItem] of activeEntries) {
       const session = byKey.get(storedKey) || byLegacyId.get(storedKey)
       if (!session) continue
       const key = migrateSessionState(session)
-      const item = state.queueInFlight[key] || originalItem
+      const item = state.queueInFlight[key]
+      if (!item || item.id !== originalItem.id) continue
       const status = await currentSessionStatus(session)
+      if (state.queueInFlight[key]?.id !== item.id) continue
       if (status !== "idle") continue
-      if (pendingCompletionExists(session, item.dispatchedAt)) continue
+      if (pendingCompletionExists(session, item)) continue
       try {
         if (await synthesizeRecoveredCompletion(session, item)) {
           log("INFO", `recovered completed queue item session=${session.id} item=${item.id}`)
           continue
         }
-        if (session.backend === "pi") {
-          state.queuePaused[key] = true
-          saveState()
-          log("WARN", `Pi queue paused after uncertain recovery session=${session.id} item=${item.id}`)
-          continue
-        }
-        waitingQueue(session).unshift(item)
-        delete state.queueInFlight[key]
+        if (state.queueInFlight[key]?.id !== item.id) continue
+        item.dispatchState = "uncertain"
+        state.queuePaused[key] = true
+        state.queueStartOnIdle[key] = false
         saveState()
-        if (!state.queuePaused[key]) await dispatchNext(session)
+        log("WARN", `Queue paused for delivery verification backend=${session.backend} session=${session.id} item=${item.id}`)
       } catch (error) {
         recordError("queue-recovery", error)
         log("WARN", `queue recovery failed session=${session.id}: ${error.message}`)
+      }
+    }
+    for (const [key, ready] of Object.entries(state.queueStartOnIdle)) {
+      if (!ready || state.queuePaused[key] || state.queueInFlight[key] || !state.queues[key]?.length) continue
+      const session = byKey.get(key)
+      if (session && await currentSessionStatus(session) === "idle") {
+        try { await dispatchNext(session) } catch (error) { recordError("queue-dispatch", error) }
       }
     }
   }
@@ -2656,21 +2725,35 @@ async function main(options = {}) {
 
   async function eventLoop() {
     while (true) {
-      const files = readdirSync(eventsDir, { withFileTypes: true }).filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map((entry) => entry.name).sort().slice(0, 20)
+      const files = readdirSync(eventsDir, { withFileTypes: true }).filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map((entry) => entry.name).sort()
       for (const name of files) {
         const path = join(eventsDir, name)
         const event = readJson(path)
         if (!event) { rmSync(path, { force: true }); continue }
-        if (event.nextAttemptAt && Date.parse(event.nextAttemptAt) > Date.now()) continue
+        if (event.completionApplied) continue
+        if (event.delivery && state.processedEventIds.includes(String(event.id))) {
+          event.completionApplied = true
+          atomicJson(path, event)
+          continue
+        }
         if (event.backend === "opencode" && event.type === "session.idle" && Date.now() - Date.parse(event.createdAt || 0) < 2500) continue
         if (event.backend === "zcode" && event.type === "session.idle" && !event.excerpt && Date.now() - Date.parse(event.createdAt || 0) < 1500) continue
         if (Date.now() - Date.parse(event.createdAt || 0) > 7 * 86400000) { rmSync(path, { force: true }); continue }
         if (event.backend === "zcode" && event.type === "session.idle" && !event.excerpt) {
           event.excerpt = zcodeLocalReply(zcodeClient?.dataRoot || join(homedir(), ".zcode", "v2"), event.sessionId, event.createdAt)
         }
+        // Finish asynchronous reply reads before taking the queue-state snapshot.
+        if (event.backend === "pi" && event.type === "session.idle" && event.instanceId) {
+          const live = listPiSessions(dataRoot).find((item) => item.id === event.sessionId && item.instanceId === event.instanceId && item.lastRunId === event.turnId)
+          if (live?.sessionFile) {
+            const savedReply = await latestPiReply(live.sessionFile).catch(() => null)
+            if (savedReply?.text?.length > String(event.excerpt || "").length
+              && (!savedReply.timestamp || Date.parse(savedReply.timestamp) <= Date.parse(event.createdAt || 0) + 2000)) event.excerpt = savedReply.text
+          }
+        }
         const eventKey = event.sessionId ? migrateSessionState(event) : null
         const activeQueueItem = eventKey ? state.queueInFlight[eventKey] : null
-        const matchesQueue = Boolean(activeQueueItem && Date.parse(event.createdAt || 0) >= Date.parse(activeQueueItem.dispatchedAt || 0))
+        const matchesQueue = Boolean(activeQueueItem && (!activeQueueItem.turnId || activeQueueItem.turnId === event.turnId) && Date.parse(event.createdAt || 0) >= Date.parse(activeQueueItem.dispatchedAt || 0))
         if (eventAlreadyHandled(event, matchesQueue ? activeQueueItem : null)) {
           rmSync(path, { force: true })
           log("INFO", `duplicate completion ignored event=${event.id || name} session=${event.sessionId || "none"}`)
@@ -2691,49 +2774,57 @@ async function main(options = {}) {
         }
         const icon = isInterrupted ? "⏹" : isError ? "❌" : "✅"
         const stats = event.summary ? t("changeStats", event.summary.files || 0, event.summary.additions || 0, event.summary.deletions || 0) : ""
-        if (event.backend === "pi" && !isError && event.instanceId) {
-          const live = listPiSessions(dataRoot).find((item) => item.id === event.sessionId && item.instanceId === event.instanceId && item.lastRunId === event.turnId)
-          if (live?.sessionFile) {
-            const savedReply = await latestPiReply(live.sessionFile).catch(() => null)
-            if (savedReply?.text?.length > String(event.excerpt || "").length
-              && (!savedReply.timestamp || Date.parse(savedReply.timestamp) <= Date.parse(event.createdAt || 0) + 2000)) {
-              event.excerpt = savedReply.text
-              atomicJson(path, event)
-            }
+        const detail = isError ? t("error", event.error || t("unknownError")) : event.excerpt ? t("latestReply", event.excerpt) : ""
+        let text = t("completionAgent", icon, backendText(event.backend || "opencode"), isInterrupted ? t("taskInterrupted") : isError ? t("executionFailed") : t("taskCompleted"), event.title, event.directory, stats, queueNote, detail)
+        if (matchesQueue && !unsuccessful && waiting === 0) text += `\n\n${t("allDone", event.title)}`
+        // Persist notification intent before committing queue effects. Sending is independent.
+        event.id ||= `legacy:${name}`
+        event.delivery = { text, extra: completionButtons(event) }
+        atomicJson(path, event)
+        if (matchesQueue) {
+          delete state.queueInFlight[eventKey]
+          if (unsuccessful) {
+            state.queuePaused[eventKey] = true
+            state.queueStartOnIdle[eventKey] = false
           }
         }
-        const detail = isError ? t("error", event.error || t("unknownError")) : event.excerpt ? t("latestReply", event.excerpt) : ""
-        const text = t("completionAgent", icon, backendText(event.backend || "opencode"), isInterrupted ? t("taskInterrupted") : isError ? t("executionFailed") : t("taskCompleted"), event.title, event.directory, stats, queueNote, detail)
+        const shouldStart = eventKey && event.type === "session.idle" && waiting && !state.queuePaused[eventKey]
+          && (matchesQueue || state.queueStartOnIdle[eventKey])
+        if (shouldStart) state.queueStartOnIdle[eventKey] = true
+        rememberEvent(event)
+        event.completionApplied = true
+        atomicJson(path, event)
+        if (shouldStart) {
+          try {
+            await dispatchNext({ id: event.sessionId, backend: event.backend || "opencode", instanceId: event.instanceId || null, title: event.title, directory: event.directory, serverUrl: event.serverUrl })
+          } catch (error) {
+            recordError("queue-dispatch", error)
+            // Queue remains persisted. Notification retries must never redispatch it.
+            const notice = { id: `dispatch-failed:${randomUUID()}`, completionApplied: true, createdAt: new Date().toISOString(), delivery: { text: t("nextFailed", compact(error.message, 300)), extra: completionButtons(event) } }
+            atomicJson(join(eventsDir, `${Date.now()}-${randomUUID()}.json`), notice)
+          }
+        }
+      }
+      await sleep(1500)
+    }
+  }
+
+  async function notificationLoop() {
+    while (true) {
+      const files = readdirSync(eventsDir).filter((name) => name.endsWith(".json")).sort()
+      for (const name of files) {
+        const path = join(eventsDir, name)
+        const event = readJson(path)
+        if (!event?.completionApplied || !event.delivery) continue
+        if (event.nextAttemptAt && Date.parse(event.nextAttemptAt) > Date.now()) continue
         try {
           if (event.backend === "pi") {
-            await sendLongText(text, completionButtons(event), {
+            await sendLongText(event.delivery.text, event.delivery.extra, {
               startIndex: Number(event.deliveryPart || 0),
               afterPart: (index) => { event.deliveryPart = index; atomicJson(path, event) },
             })
-          } else await send(compact(text), completionButtons(event))
-          if (matchesQueue) {
-            delete state.queueInFlight[eventKey]
-            if (unsuccessful) {
-              state.queuePaused[eventKey] = true
-              state.queueStartOnIdle[eventKey] = false
-            }
-          }
-          rememberEvent(event)
+          } else await send(compact(event.delivery.text), event.delivery.extra)
           rmSync(path, { force: true })
-          const shouldStart = eventKey && event.type === "session.idle" && waiting && !state.queuePaused[eventKey]
-            && (matchesQueue || state.queueStartOnIdle[eventKey])
-          if (shouldStart) {
-            state.queueStartOnIdle[eventKey] = false
-            saveState()
-            try {
-              await dispatchNext({ id: event.sessionId, backend: event.backend || "opencode", instanceId: event.instanceId || null, title: event.title, directory: event.directory, serverUrl: event.serverUrl })
-            } catch (error) {
-              recordError("queue-dispatch", error)
-              await send(t("nextFailed", compact(error.message, 300))).catch(() => {})
-            }
-          } else if (matchesQueue && !unsuccessful && waiting === 0) {
-            await send(t("allDone", event.title))
-          }
         } catch (error) {
           event.attempts = Number(event.attempts || 0) + 1
           event.nextAttemptAt = new Date(Date.now() + Math.min(300000, 5000 * (2 ** Math.min(event.attempts, 6)))).toISOString()
@@ -2799,7 +2890,7 @@ async function main(options = {}) {
     recordError("telegram-startup", error)
     log("WARN", `Telegram startup connection failed; retrying without exiting: ${error.message}`)
   }
-  await Promise.all([telegramLoop(), eventLoop(), recoveryLoop(), permissionLoop(), codexLoop(), zcodeLoop(), openCodeMonitorLoop()])
+  await Promise.all([telegramLoop(), eventLoop(), notificationLoop(), recoveryLoop(), permissionLoop(), codexLoop(), zcodeLoop(), openCodeMonitorLoop()])
 }
 
 async function check() {

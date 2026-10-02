@@ -63,6 +63,8 @@ assert.equal(recoveredDetail.latestReply, "Working on the tests.")
 
 const client = new ZCodeAppServer({ dataRoot })
 client.listSessions = async () => []
+client.residentSessions.add("sess_desktop")
+client.subscriptions.add("sess_desktop")
 const events = []
 client.on("terminal", (event) => events.push(event))
 try {
@@ -71,12 +73,50 @@ try {
   assert.equal(events.length, 0, "baseline must not announce an old task")
   database.prepare("UPDATE tasks SET task_status = ?, updated_at = ? WHERE task_id = ?").run("completed", now + 1000, "sess_desktop")
   await new Promise((resolve) => setTimeout(resolve, 2300))
-  assert.equal(events.length, 1)
+  assert.equal(events.length, 1, "Desktop completion must still be monitored after the session was controlled from Telegram")
   assert.equal(events[0].type, "session.idle")
   assert.equal(events[0].sessionId, "sess_desktop")
   assert.equal(events[0].excerpt, "Created the README and verified the links.")
   await new Promise((resolve) => setTimeout(resolve, 2200))
   assert.equal(events.length, 1, "unchanged completed task must not repeat")
+
+  // An index fallback can arrive before RPC replay. The same task must notify
+  // only once, while a later user prompt in this session must still notify.
+  const replayClient = new ZCodeAppServer({ dataRoot })
+  replayClient.listSessions = async () => []
+  replayClient.residentSessions.add("sess_desktop")
+  replayClient.subscriptions.add("sess_desktop")
+  const replayEvents = []
+  replayClient.on("terminal", (event) => replayEvents.push(event))
+  const poll = async () => {
+    await replayClient.startMonitor({ intervalMs: 60000 })
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    assert.equal(replayClient.monitorBusy, false)
+  }
+  try {
+    const firstEnd = Date.now() + 1000
+    messages.prepare("INSERT INTO message VALUES (?,?,?,?)").run("turn_user_1", "sess_desktop", firstEnd - 100, JSON.stringify({ role: "user" }))
+    await poll()
+    database.prepare("UPDATE tasks SET task_status = ?, updated_at = ? WHERE task_id = ?").run("completed", firstEnd, "sess_desktop")
+    await poll()
+    assert.equal(replayEvents.length, 1)
+    assert.equal(replayEvents[0].taskMessageId, "turn_user_1")
+    replayClient.eventSeq.set("sess_desktop", 0)
+    replayClient.listSessions = async () => [{ id: "sess_desktop", status: "busy", updatedAt: firstEnd }]
+    replayClient.request = async () => ({ events: [{
+      eventId: "replayed-terminal", sessionId: "sess_desktop", turnId: "rpc-turn-1", seq: 1,
+      type: "turn.completed", timestamp: firstEnd + 10, payload: { resultType: "success", response: "Done" },
+    }] })
+    await poll()
+    assert.equal(replayEvents.length, 1, "index completion and replayed RPC completion are one task")
+
+    const secondEnd = firstEnd + 1000
+    messages.prepare("INSERT INTO message VALUES (?,?,?,?)").run("turn_user_2", "sess_desktop", secondEnd - 100, JSON.stringify({ role: "user" }))
+    database.prepare("UPDATE tasks SET task_status = ?, updated_at = ? WHERE task_id = ?").run("completed", secondEnd, "sess_desktop")
+    await poll()
+    assert.equal(replayEvents.length, 2, "a new Desktop task must not be suppressed by an earlier RPC subscription")
+    assert.equal(replayEvents[1].taskMessageId, "turn_user_2")
+  } finally { await replayClient.stop() }
 } finally {
   await client.stop()
   messages.close()

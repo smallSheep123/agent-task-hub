@@ -10,6 +10,13 @@ const CODEX_SOURCE_KINDS = ["cli", "vscode", "exec", "appServer", "unknown"]
 const CODEX_TRANSPORTS = new Set(["private", "shared", "auto"])
 const INTERNAL_REVIEW_PROMPT = /^The following is the Codex agent history whose request action you are assessing\./i
 
+function deliveryError(error, method) {
+  if (method !== "turn/start") return error
+  const uncertain = new Error(`Codex task submission acknowledgement was lost; delivery is uncertain: ${error.message}`, { cause: error })
+  uncertain.code = "CODEX_ACK_UNCERTAIN"
+  return uncertain
+}
+
 function isGenericThreadName(value) {
   return !String(value || "").trim() || /^Codex task$/i.test(String(value).trim())
 }
@@ -411,9 +418,9 @@ export class CodexAppServer extends EventEmitter {
   #fail(error) {
     this.ready = false
     this.loadedThreads.clear()
-    for (const { reject, timer } of this.pending.values()) {
+    for (const { reject, timer, method } of this.pending.values()) {
       clearTimeout(timer)
-      reject(error)
+      reject(deliveryError(error, method))
     }
     this.pending.clear()
   }
@@ -440,7 +447,7 @@ export class CodexAppServer extends EventEmitter {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
-        reject(new Error("Codex app-server request timed out: " + method))
+        reject(deliveryError(new Error("Codex app-server request timed out: " + method), method))
       }, timeoutMs)
       this.pending.set(id, { resolve, reject, timer, method })
       try { this.#write({ method, id, params }) } catch (error) {
@@ -611,6 +618,23 @@ export class CodexAppServer extends EventEmitter {
     this.backgroundPausedUntil = Math.max(this.backgroundPausedUntil, Date.now() + Math.max(0, Number(durationMs) || 0))
   }
 
+  exportMonitorState() {
+    return {
+      monitorStartedAt: this.monitorStartedAt,
+      monitorInitialized: this.monitorInitialized,
+      threadVersions: [...this.threadVersions],
+      observedTurns: [...this.observedTurns],
+    }
+  }
+
+  importMonitorState(snapshot) {
+    if (!snapshot || this.monitorActive) return
+    this.monitorStartedAt = Number(snapshot.monitorStartedAt) || 0
+    this.monitorInitialized = Boolean(snapshot.monitorInitialized)
+    this.threadVersions = new Map(snapshot.threadVersions || [])
+    this.observedTurns = new Set(snapshot.observedTurns || [])
+  }
+
   #monitorDiagnostic(message) {
     const now = Date.now()
     if (this.monitorLastDiagnosticAt && now - this.monitorLastDiagnosticAt < 15 * 60 * 1000) return
@@ -621,7 +645,7 @@ export class CodexAppServer extends EventEmitter {
   async startMonitor({ intervalMs = 5000, limit = 100 } = {}) {
     if (this.monitorActive) return
     this.monitorActive = true
-    this.monitorStartedAt = Date.now()
+    this.monitorStartedAt ||= Date.now()
     const baseInterval = Math.max(2000, Number(intervalMs) || 5000)
     const run = async () => {
       let delay = baseInterval

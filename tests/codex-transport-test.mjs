@@ -110,6 +110,12 @@ class FakeWebSocket {
     const request = JSON.parse(serialized)
     if (request.id === undefined) return
     this.methods.push(request.method)
+    if (request.method === "turn/start" && this.turnStartBehavior === "timeout") return
+    if (request.method === "turn/start" && this.turnStartBehavior === "disconnect") { this.close(1006, "connection lost after submit"); return }
+    if (request.method === "turn/start" && this.turnStartBehavior === "reject") {
+      queueMicrotask(() => this.emit("message", { data: JSON.stringify({ id: request.id, error: { message: "invalid input" } }) }))
+      return
+    }
     const result = request.method === "initialize" ? { serverInfo: { name: "fake-ws" } }
       : request.method === "thread/list" ? { data: [], nextCursor: null }
         : request.method === "thread/start" ? { thread: { id: "thr_live", cwd: request.params.cwd, turns: [] } }
@@ -176,5 +182,24 @@ await websocketClient.interrupt(started.id)
 await websocketClient.archiveThread(started.id)
 await websocketClient.stop()
 assert.equal(websocketClient.ready, false)
+
+for (const behavior of ["timeout", "disconnect", "reject"]) {
+  const socket = new FakeWebSocket()
+  socket.turnStartBehavior = behavior
+  const testClient = new CodexAppServer({ transport: "shared", wsUrl: "ws://127.0.0.1:9234", webSocketFactory: () => socket })
+  await testClient.start()
+  testClient.loadedThreads.add("submission-test")
+  const request = testClient.request.bind(testClient)
+  testClient.request = (method, params, budget) => request(method, params, method === "turn/start" ? 25 : budget)
+  await assert.rejects(testClient.sendPrompt("submission-test", "only once"), (error) => {
+    assert.equal(error.code === "CODEX_ACK_UNCERTAIN", behavior !== "reject")
+    return true
+  })
+  await testClient.stop()
+}
+
+const disconnectedClient = new CodexAppServer()
+disconnectedClient.loadedThreads.add("not-sent")
+await assert.rejects(disconnectedClient.sendPrompt("not-sent", "no transport"), (error) => !error.code && /not running/.test(error.message))
 
 console.log("CODEX_TRANSPORT_TEST=PASS")
