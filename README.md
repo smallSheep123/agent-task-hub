@@ -109,6 +109,14 @@ Fully restart Codex Desktop after enabling shared mode. To return to the stable 
 
 The transport setting is stored as `codexTransport` and `codexWsUrl` in the existing protected configuration directory. The shared host discovers and uses the newest Codex Desktop runtime at every start so its protocol matches the UI; the official standalone package is only a fallback.
 
+Shared mode also installs a background watchdog. Stopping the Telegram gateway leaves the shared host available to Desktop. If Desktop reports `ECONNREFUSED 127.0.0.1:9234`, repair the host without restarting a healthy instance:
+
+```powershell
+.\scripts\codex-transport.ps1 -Action repair-shared
+```
+
+Then retry opening Desktop. Explicitly switching to private mode removes both shared-host tasks and cleans up only the managed endpoint's orphaned Codex processes. This recovery handles stopped processes; it does not forcibly restart a listening but unresponsive server while tasks may be running.
+
 The main command menu stays small. Advanced queue, approval, and diagnostic commands remain accepted. Buttons carry the action, backend, and session identity, so changing modes does not require repeatedly typing identifiers.
 
 The home dashboard lists up to three running conversations per agent and adds direct session buttons for the busiest items. Use **Refresh** to recalculate elapsed time and current blockers; use **All sessions** for history and idle conversations.

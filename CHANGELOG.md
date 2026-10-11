@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## 0.7.3 - 2026-10-11
+
+### Fixed
+
+- Keep the shared Codex host alive independently of the Telegram gateway: restart an exited child and install a background watchdog for a stopped host task while Desktop still uses the shared endpoint.
+- Add `scripts/codex-transport.ps1 -Action repair-shared` to update recovery tasks without interrupting a healthy host. Local readiness checks bypass system proxies.
+- On explicit shared-mode disable, remove the watchdog and clean up orphaned Codex listeners matching the configured loopback endpoint, even if their scheduled task is missing. Preserve unrelated processes and report remaining port conflicts.
+
+### Verification
+
+- Added isolated lifecycle regression tests for non-disruptive repair, occupied ports, missing task records, and exact-endpoint orphan cleanup.
+- ZCode Desktop live input synchronization is still pending remote-control pairing; this release does not change its separate App Server send path.
+
 ## 0.7.2 - 2026-10-03
 
 ### Fixed

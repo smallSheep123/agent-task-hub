@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('probe','enable-shared','disable-shared')]
+    [ValidateSet('probe','enable-shared','disable-shared','repair-shared')]
     [string]$Action = 'probe',
     [string]$DataRoot = "$env:USERPROFILE\.config\agent-task-hub",
     [int]$Port = 9234
@@ -12,6 +12,7 @@ $ConfigPath = Join-Path $DataRoot 'config.json'
 $Probe = Join-Path $PSScriptRoot 'codex-shared-probe.mjs'
 $HostRunner = Join-Path $PSScriptRoot 'run-codex-shared-host.ps1'
 $TaskName = 'Agent Task Hub Codex App Server'
+$WatchTaskName = 'Agent Task Hub Codex Watchdog'
 $WsUrl = "ws://127.0.0.1:$Port"
 
 function Find-CodexExecutable {
@@ -48,23 +49,39 @@ function Set-CodexTransport([string]$Transport, [string]$Url = '') {
 }
 
 function Test-SharedReady {
+    $response = $null
     try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/readyz" -TimeoutSec 2
-        return $response.StatusCode -eq 200
+        $request = [Net.HttpWebRequest]::Create("http://127.0.0.1:$Port/readyz")
+        $request.Proxy = $null
+        $request.Timeout = 2000
+        $response = $request.GetResponse()
+        return [int]$response.StatusCode -eq 200
     } catch { return $false }
+    finally { if ($response) { $response.Dispose() } }
+}
+
+function Install-SharedWatchdog {
+    $watcher = Join-Path $PSScriptRoot 'watch-codex-shared-host.ps1'
+    $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
+    $action = New-ScheduledTaskAction -Execute $powershell -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$watcher`" -Port $Port" -WorkingDirectory $Root
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+    $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 100 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
+    Register-ScheduledTask -TaskName $WatchTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+    if ((Get-ScheduledTask -TaskName $WatchTaskName).State -ne 'Running') { Start-ScheduledTask -TaskName $WatchTaskName }
 }
 
 function Start-SharedHost([string]$Codex) {
-    if (Test-SharedReady) { return }
+    $wasReady = Test-SharedReady
     $occupied = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-    if ($occupied) { throw "Port $Port is already in use by process $($occupied[0].OwningProcess)." }
+    if ($occupied -and -not $wasReady) { throw "Port $Port is already in use by process $($occupied[0].OwningProcess)." }
     $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
     $action = New-ScheduledTaskAction -Execute $powershell -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$HostRunner`" -Port $Port" -WorkingDirectory $Root
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Shared loopback Codex app-server for Codex Desktop and Agent Task Hub' -Force | Out-Null
-    Start-ScheduledTask -TaskName $TaskName
+    if (-not $wasReady) { Start-ScheduledTask -TaskName $TaskName }
     for ($i = 0; $i -lt 30 -and -not (Test-SharedReady); $i++) { Start-Sleep -Milliseconds 500 }
     if (-not (Test-SharedReady)) {
         $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -73,10 +90,25 @@ function Start-SharedHost([string]$Codex) {
 }
 
 function Stop-SharedHost {
+    if (Get-ScheduledTask -TaskName $WatchTaskName -ErrorAction SilentlyContinue) {
+        Stop-ScheduledTask -TaskName $WatchTaskName -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $WatchTaskName -Confirm:$false
+    }
     $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    if (-not $task) { return }
-    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    if ($task) {
+        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    }
+    # Remove only this exact loopback app-server, never another Codex task process.
+    $escapedUrl = [regex]::Escape($WsUrl)
+    Get-CimInstance Win32_Process -Filter "Name = 'codex.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -match ('^\s*(?:"[^"]*codex\.exe"|[^\s"]*codex\.exe)\s+app-server\s+--listen\s+"?' + $escapedUrl + '"?(\s|$)')
+    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop }
+    for ($i = 0; $i -lt 20; $i++) {
+        if (-not (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)) { return }
+        Start-Sleep -Milliseconds 200
+    }
+    throw "Port $Port still has a listener; it was not killed because it is not the managed Codex host."
 }
 
 function Invoke-SharedProbe([string]$Codex) {
@@ -108,8 +140,15 @@ switch ($Action) {
         Set-CodexTransport 'shared' $WsUrl
         [Environment]::SetEnvironmentVariable('CODEX_APP_SERVER_WS_URL', $WsUrl, 'User')
         [Environment]::SetEnvironmentVariable('CODEX_APP_SERVER_USE_LOCAL_DAEMON', $null, 'User')
+        Install-SharedWatchdog
         Write-Host "CODEX_TRANSPORT=shared URL=$WsUrl"
         Write-Host 'Restart Agent Task Hub, then fully restart Codex Desktop to test shared ownership.'
+    }
+    'repair-shared' {
+        if ([Environment]::GetEnvironmentVariable('CODEX_APP_SERVER_WS_URL', 'User') -ne $WsUrl) { throw 'Shared endpoint is not configured; use enable-shared instead.' }
+        Start-SharedHost $codex
+        Install-SharedWatchdog
+        Write-Host "SHARED_HOST_READY=$WsUrl WATCHDOG=installed"
     }
     'disable-shared' {
         Set-CodexTransport 'private' ''

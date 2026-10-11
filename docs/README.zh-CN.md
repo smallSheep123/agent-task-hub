@@ -109,6 +109,14 @@ ZCode 使用已安装桌面端自带的 App Server。适配器在运行时读取
 
 连接方式保存在现有受保护配置目录的 `codexTransport` 与 `codexWsUrl` 字段中。共享服务每次启动都会自动发现最新的 Codex Desktop runtime，使协议版本与界面保持一致；官方 standalone 包只作为备用。
 
+共享模式还会安装独立的后台恢复任务，停止 Telegram 网关不会停止 Desktop 所需的共享服务。若 Desktop 提示 `ECONNREFUSED 127.0.0.1:9234`，可执行以下命令，再重新打开 Desktop；修复过程会保留已经健康运行的服务：
+
+```powershell
+.\scripts\codex-transport.ps1 -Action repair-shared
+```
+
+显式切换回私有模式时，会移除共享服务及恢复任务，并清理匹配该回环地址的遗留 Codex 进程。自动恢复针对进程退出或任务停止；对仍在监听但接口无响应的服务，不会在任务运行期间强制重启。
+
 ## 管理
 
 平时双击 `Bridge-Manager.cmd` 即可，也可以在 PowerShell 中执行：
